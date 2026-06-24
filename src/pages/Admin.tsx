@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router';
 import { motion, AnimatePresence } from 'framer-motion';
-import { AdminSync, verifyAdminPassword, FIXED_ROOM_ID } from '@/lib/peerSync';
+import { AdminSync } from '@/lib/peerSync';
 import {
   Play, Pause, SkipBack, SkipForward, Upload, Music, Trash2,
-  Radio, Users, ArrowLeft, Wifi, Loader2, Volume2, VolumeX, Lock, LogOut
+  Radio, Users, ArrowLeft, Wifi, Loader2, Volume2, VolumeX
 } from 'lucide-react';
 
 interface Song {
@@ -105,45 +105,6 @@ function getAudioDuration(file: File): Promise<number> {
   });
 }
 
-// ─── Password Gate ──────────────────────────────────────
-
-function PasswordGate({ onUnlock }: { onUnlock: () => void }) {
-  const [pw, setPw] = useState('');
-  const [err, setErr] = useState(false);
-
-  const submit = () => {
-    if (verifyAdminPassword(pw)) {
-      onUnlock();
-      localStorage.setItem('sw_auth', '1');
-    } else {
-      setErr(true);
-      setTimeout(() => setErr(false), 2000);
-    }
-  };
-
-  return (
-    <div className="min-h-[100dvh] bg-[#0A0A0A] text-white font-['Tajawal'] flex items-center justify-center" dir="rtl">
-      <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} className="w-full max-w-sm px-6">
-        <div className="text-center mb-8">
-          <div className="w-16 h-16 rounded-2xl bg-[#FF00FF]/10 flex items-center justify-center mx-auto mb-4">
-            <Lock className="w-8 h-8 text-[#FF00FF]" />
-          </div>
-          <h1 className="text-2xl font-bold mb-2">مساحة المسؤول</h1>
-          <p className="text-[#A0A0A0] text-sm">أدخل كلمة المرور</p>
-        </div>
-        <div className="space-y-3">
-          <input type="password" value={pw} onChange={e => { setPw(e.target.value); setErr(false); }}
-            placeholder="كلمة المرور"
-            className={`w-full bg-[#111111] border rounded-xl px-4 py-3.5 text-center text-white placeholder-[#555555] focus:outline-none font-mono text-lg ${err ? 'border-[#FF3366]' : 'border-[#222222] focus:border-[#FF00FF]'}`}
-            onKeyDown={e => e.key === 'Enter' && submit()} autoFocus />
-          {err && <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-[#FF3366] text-xs text-center">كلمة المرور غير صحيحة</motion.p>}
-          <button onClick={submit} className="w-full bg-[#FF00FF] hover:bg-[#FF00FF]/80 text-[#0A0A0A] font-bold py-3.5 rounded-xl active:scale-[0.98] transition-all">دخول</button>
-        </div>
-      </motion.div>
-    </div>
-  );
-}
-
 // ─── Main Admin ─────────────────────────────────────────
 
 export default function Admin() {
@@ -152,7 +113,7 @@ export default function Admin() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const syncRef = useRef<AdminSync | null>(null);
 
-  const [auth, setAuth] = useState(() => localStorage.getItem('sw_auth') === '1');
+  // Auth removed — always accessible
   const [songs, setSongs] = useState<Song[]>([]);
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -182,7 +143,7 @@ export default function Admin() {
 
     sync.onNewListener((info) => {
       setListenerCount(sync.getListenerCount());
-      getAllSongs().then(all => sync.sendSongs(info.id, all));
+      getAllSongs().then(all => all.forEach(s => sync.addSong(s)));
     });
 
     const iv = setInterval(() => setListenerCount(sync.getListenerCount()), 1000);
@@ -254,7 +215,7 @@ export default function Admin() {
         if (songs.find(s => s.id === id)) continue;
         const song: Song = { id, title: file.name.replace(/\.[^/.]+$/, ''), fileData: b64, mimeType: file.type || 'audio/mpeg', duration: await getAudioDuration(file), size: file.size, createdAt: Date.now() };
         await saveSong(song);
-        syncRef.current?.broadcastNewSong(song);
+        syncRef.current?.addSong(song);
       } catch (err) { console.error(err); }
     }
     await loadSongs(); setUploading(false);
@@ -267,9 +228,7 @@ export default function Admin() {
     await loadSongs(); setDeleteConfirm(null);
   };
 
-  const logout = () => { syncRef.current?.destroy(); localStorage.removeItem('sw_auth'); setAuth(false); };
-
-  if (!auth) return <PasswordGate onUnlock={() => setAuth(true)} />;
+  const logout = () => { syncRef.current?.destroy(); navigate('/'); };
 
   return (
     <div className="min-h-[100dvh] bg-[#0A0A0A] text-white font-['Tajawal'] pb-40" dir="rtl">
@@ -285,9 +244,7 @@ export default function Admin() {
           </div>
           <div className="flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${syncState === 'ready' ? 'bg-[#00FF66] animate-pulse' : 'bg-[#FFAA00]'}`} />
-            <button onClick={logout} className="text-[10px] text-[#FF3366] hover:bg-[#FF3366]/10 px-2 py-1 rounded transition-colors flex items-center gap-1">
-              <LogOut className="w-3 h-3" /> خروج
-            </button>
+            <span className="text-[10px] text-[#A0A0A0] font-mono">{syncRef.current?.adminPeerId ? syncRef.current.adminPeerId.slice(0, 12) + '...' : '...'}</span>
           </div>
         </div>
       </div>
@@ -297,7 +254,7 @@ export default function Admin() {
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="bg-gradient-to-br from-[#FF00FF]/10 to-[#111111] border border-[#FF00FF]/20 rounded-2xl p-4 mb-4">
           <div className="flex items-center justify-between">
             <p className="text-[#A0A0A0] text-xs">الغرفة:</p>
-            <span className="text-[10px] text-[#00FF66] font-mono bg-[#00FF66]/10 px-2 py-0.5 rounded">{FIXED_ROOM_ID}</span>
+            <span className="text-[10px] text-[#00FF66] font-mono bg-[#00FF66]/10 px-2 py-0.5 rounded">{syncRef.current?.adminPeerId || 'جاري التحميل...'}</span>
           </div>
           <p className="text-[#555555] text-[10px] mt-1">المستمع يتصل تلقائياً بهذه الغرفة</p>
         </motion.div>

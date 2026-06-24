@@ -1,8 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { useNavigate } from 'react-router';
+import { useNavigate, useSearchParams } from 'react-router';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ListenerSync, getSyncedTime, FIXED_ROOM_ID } from '@/lib/peerSync';
-import type { SyncCmd } from '@/lib/peerSync';
+import { ListenerSync, getSyncedTime } from '@/lib/peerSync';
 import {
   Headphones, Unlink, ArrowLeft, Volume2, Volume1, VolumeX,
   Loader2, Wifi, Music, Radio, Activity
@@ -82,7 +81,7 @@ export default function Listener() {
   const navigate = useNavigate();
   const audioRef = useRef<HTMLAudioElement>(null);
   const syncRef = useRef<ListenerSync | null>(null);
-  const pendingCmdRef = useRef<SyncCmd | null>(null);
+  const pendingCmdRef = useRef<any>(null);
 
   const [status, setStatus] = useState<'connecting' | 'syncing' | 'ready' | 'error' | 'disconnected'>('connecting');
   const [isPlaying, setIsPlaying] = useState(false);
@@ -94,6 +93,8 @@ export default function Listener() {
   const [trackName, setTrackName] = useState('');
   const [songCount, setSongCount] = useState(0);
   const [latency, setLatency] = useState(0);
+  const [adminPeerId, setAdminPeerId] = useState('');
+  const [searchParams] = useSearchParams();
 
   // Load cached songs
   useEffect(() => {
@@ -120,14 +121,14 @@ export default function Listener() {
   useEffect(() => { if (audioRef.current) audioRef.current.volume = volume; }, [volume]);
   useEffect(() => { localStorage.setItem('sw_lvol', volume.toString()); }, [volume]);
 
-  // Auto-connect on mount
-  useEffect(() => {
+  // Connect to admin
+  const connectToAdmin = useCallback((peerId: string) => {
+    if (!peerId) return;
     const sync = new ListenerSync();
     syncRef.current = sync;
 
     sync.onStateChange(() => {
       setStatus(sync.state as any);
-      setLatency(sync.latency);
     });
 
     sync.onSong(async (song) => {
@@ -142,14 +143,20 @@ export default function Listener() {
     sync.onCmd((cmd) => executeCmd(cmd));
 
     dbGetAllSongs().then(songs => {
-      sync.connect(songs.map(s => s.id));
+      sync.connect(peerId, songs.map(s => s.id));
     });
-
-    return () => sync.disconnect();
-    // eslint-disable-next-line
   }, []);
 
-  const executeCmd = useCallback((cmd: SyncCmd) => {
+  // Auto-connect from URL
+  useEffect(() => {
+    const peerId = searchParams.get('admin');
+    if (peerId) {
+      setAdminPeerId(peerId);
+      connectToAdmin(peerId);
+    }
+  }, [searchParams, connectToAdmin]);
+
+  const executeCmd = useCallback((cmd: any) => {
     const a = audioRef.current;
     if (!a) return;
 
@@ -217,7 +224,7 @@ export default function Listener() {
 
     sync.onStateChange(() => {
       setStatus(sync.state as any);
-      setLatency(sync.latency);
+      // latency tracking removed
     });
 
     sync.onSong(async (song) => {
@@ -227,7 +234,7 @@ export default function Listener() {
 
     sync.onCmd((cmd) => executeCmd(cmd));
 
-    dbGetAllSongs().then(songs => sync.connect(songs.map(s => s.id)));
+    dbGetAllSongs().then(songs => sync.connect(adminPeerId, songs.map(s => s.id)));
   };
 
   const volIcon = volume === 0 ? <VolumeX className="w-4 h-4" /> : volume < 0.5 ? <Volume1 className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />;
@@ -271,13 +278,32 @@ export default function Listener() {
           </div>
         </div>
 
-        {/* Room Info */}
-        <div className="text-center mb-4">
-          <div className="flex items-center justify-center gap-2 text-[10px] text-[#555555] font-mono mb-1">
-            <Radio className="w-3 h-3" />
-            {FIXED_ROOM_ID}
-          </div>
-          {latency > 0 && <span className="text-[10px] text-[#555555] font-mono">{latency}ms</span>}
+        {/* Input PeerID or show connected */}
+        <div className="text-center mb-4 w-full max-w-sm">
+          {status === 'connecting' || status === 'syncing' ? (
+            <div className="flex items-center justify-center gap-2 text-[10px] text-[#555555] font-mono mb-1">
+              <Radio className="w-3 h-3" />
+              {adminPeerId}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <input
+                type="text"
+                value={adminPeerId}
+                onChange={e => setAdminPeerId(e.target.value)}
+                placeholder="أدخل معرف الغرفة من المسؤول"
+                className="w-full bg-[#111111] border border-[#222222] rounded-xl px-4 py-3 text-center text-white placeholder-[#555555] focus:border-[#FF00FF] focus:outline-none text-sm font-mono"
+                onKeyDown={e => e.key === 'Enter' && adminPeerId.trim() && connectToAdmin(adminPeerId.trim())}
+              />
+              <button
+                onClick={() => adminPeerId.trim() && connectToAdmin(adminPeerId.trim())}
+                disabled={!adminPeerId.trim()}
+                className="w-full bg-[#FF00FF] hover:bg-[#FF00FF]/80 disabled:opacity-40 disabled:cursor-not-allowed text-[#0A0A0A] font-bold py-2.5 rounded-xl active:scale-[0.98] transition-all text-sm"
+              >
+                اتصال
+              </button>
+            </div>
+          )}
         </div>
 
         <AnimatePresence mode="wait">
