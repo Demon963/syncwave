@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { AdminSync } from '@/lib/peerSync';
 import {
   Play, Pause, SkipBack, SkipForward, Upload, Music, Trash2,
-  Radio, Users, ArrowLeft, Wifi, Loader2, Volume2, VolumeX
+  Radio, Users, ArrowLeft, Wifi, Loader2, Volume2, VolumeX, Copy, Check
 } from 'lucide-react';
 
 interface Song {
@@ -105,6 +105,10 @@ function getAudioDuration(file: File): Promise<number> {
   });
 }
 
+function genRoomCode(): string {
+  return Math.floor(100 + Math.random() * 900).toString();
+}
+
 // ─── Main Admin ─────────────────────────────────────────
 
 export default function Admin() {
@@ -113,7 +117,7 @@ export default function Admin() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const syncRef = useRef<AdminSync | null>(null);
 
-  // Auth removed — always accessible
+  const [roomCode, setRoomCode] = useState('');
   const [songs, setSongs] = useState<Song[]>([]);
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -122,29 +126,33 @@ export default function Admin() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [listenerCount, setListenerCount] = useState(0);
-  const [syncState, setSyncState] = useState<'init' | 'ready' | 'error'>('init');
+  const [syncState, setSyncState] = useState<'connecting' | 'ready' | 'error'>('connecting');
+  const [syncError, setSyncError] = useState('');
   const [uploading, setUploading] = useState(false);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [isMuted, setIsMuted] = useState(false);
+  const [copied, setCopied] = useState(false);
 
-  useEffect(() => { loadSongs(); }, []);
-  const loadSongs = async () => { setSongs(await getAllSongs()); };
-
-  // Init sync
+  // Load songs + generate room code + init sync
   useEffect(() => {
-    const sync = new AdminSync();
+    const code = genRoomCode();
+    setRoomCode(code);
+    loadSongs();
+
+    const sync = new AdminSync(code);
     syncRef.current = sync;
 
     sync.onStateChange(() => {
-      setSyncState(sync.state === 'ready' ? 'ready' : 'error');
+      setSyncState(sync.state === 'ready' ? 'ready' : sync.state === 'error' ? 'error' : 'connecting');
+      setSyncError(sync.errorMessage);
       setListenerCount(sync.getListenerCount());
     });
 
-    sync.onNewListener((info) => {
+    sync.onNewListener(() => {
       setListenerCount(sync.getListenerCount());
     });
 
-    // Register ALL existing songs so new listeners get them
+    // Register ALL existing songs
     getAllSongs().then(all => {
       console.log('[Admin] Registering', all.length, 'existing songs');
       all.forEach(s => sync.addSong(s));
@@ -153,6 +161,8 @@ export default function Admin() {
     const iv = setInterval(() => setListenerCount(sync.getListenerCount()), 1000);
     return () => { clearInterval(iv); sync.destroy(); };
   }, []);
+
+  const loadSongs = async () => { setSongs(await getAllSongs()); };
 
   // Audio
   useEffect(() => {
@@ -232,7 +242,9 @@ export default function Admin() {
     await loadSongs(); setDeleteConfirm(null);
   };
 
-  const logout = () => { syncRef.current?.destroy(); navigate('/'); };
+  const copyCode = () => {
+    navigator.clipboard.writeText(roomCode).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }).catch(() => {});
+  };
 
   return (
     <div className="min-h-[100dvh] bg-[#0A0A0A] text-white font-['Tajawal'] pb-40" dir="rtl">
@@ -247,20 +259,27 @@ export default function Admin() {
             <span className="font-bold text-sm">مساحة المسؤول</span>
           </div>
           <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${syncState === 'ready' ? 'bg-[#00FF66] animate-pulse' : 'bg-[#FFAA00]'}`} />
-            <span className="text-[10px] text-[#A0A0A0] font-mono">{syncRef.current?.adminPeerId ? syncRef.current.adminPeerId.slice(0, 12) + '...' : '...'}</span>
+            <div className={`w-2 h-2 rounded-full ${syncState === 'ready' ? 'bg-[#00FF66] animate-pulse' : syncState === 'error' ? 'bg-[#FF3366]' : 'bg-[#FFAA00] animate-pulse'}`} />
+            <span className="text-[10px] text-[#A0A0A0] font-mono">{syncState === 'ready' ? 'متصل' : syncState === 'error' ? 'خطأ' : 'جاري...'}</span>
           </div>
         </div>
       </div>
 
       <div className="max-w-[1200px] mx-auto px-4 pt-4">
-        {/* Room Info */}
-        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="bg-gradient-to-br from-[#FF00FF]/10 to-[#111111] border border-[#FF00FF]/20 rounded-2xl p-4 mb-4">
-          <div className="flex items-center justify-between">
-            <p className="text-[#A0A0A0] text-xs">الغرفة:</p>
-            <span className="text-[10px] text-[#00FF66] font-mono bg-[#00FF66]/10 px-2 py-0.5 rounded">{syncRef.current?.adminPeerId || 'جاري التحميل...'}</span>
+        {/* Room Code - BIG & PROMINENT */}
+        <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="bg-gradient-to-br from-[#FF00FF]/15 to-[#111111] border border-[#FF00FF]/30 rounded-2xl p-5 mb-4 text-center">
+          <p className="text-[#A0A0A0] text-xs mb-2">رمز الغرفة — أعطِ هذا الرقم للمستمعين</p>
+          <div className="flex items-center justify-center gap-3 mb-2">
+            <button onClick={copyCode} className="p-2 hover:bg-white/10 rounded-lg transition-colors" title="نسخ">
+              {copied ? <Check className="w-5 h-5 text-[#00FF66]" /> : <Copy className="w-5 h-5 text-[#A0A0A0]" />}
+            </button>
+            <span className="text-4xl font-bold font-mono tracking-wider text-[#00F0FF]">{roomCode || '...'}</span>
+            <button onClick={copyCode} className="p-2 hover:bg-white/10 rounded-lg transition-colors" title="نسخ">
+              {copied ? <Check className="w-5 h-5 text-[#00FF66]" /> : <Copy className="w-5 h-5 text-[#A0A0A0]" />}
+            </button>
           </div>
-          <p className="text-[#555555] text-[10px] mt-1">المستمع يتصل تلقائياً بهذه الغرفة</p>
+          <p className="text-[#555555] text-[10px]">المستمع يدخل هذا الرمز للانضمام</p>
+          {syncError && <p className="text-[#FF3366] text-xs mt-2">{syncError}</p>}
         </motion.div>
 
         {/* Stats */}

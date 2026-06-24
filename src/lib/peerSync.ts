@@ -4,6 +4,8 @@ const ICE_SERVERS = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
   { urls: 'stun:stun2.l.google.com:19302' },
+  { urls: 'stun:stun3.l.google.com:19302' },
+  { urls: 'stun:stun4.l.google.com:19302' },
   { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
   { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
 ];
@@ -30,8 +32,10 @@ function sd(p: any) { try { p?.destroy(); } catch {} }
 
 export class AdminSync {
   peer: any;
+  roomCode: string = '';
   adminPeerId: string = '';
   state: 'connecting' | 'ready' | 'error' = 'connecting';
+  errorMessage: string = '';
   private L: Map<string, any> = new Map();
   private cbS?: () => void;
   private cbN?: (id: string) => void;
@@ -39,31 +43,53 @@ export class AdminSync {
   private dead: boolean = false;
   private songs: Map<string, any> = new Map();
 
-  constructor() {
+  constructor(roomCode: string) {
+    this.roomCode = roomCode;
+    this.adminPeerId = `sw_${roomCode}`;
     this.PC = (window as any).Peer;
-    if (!this.PC) loadP().then(() => { this.PC = (window as any).Peer; this.init(); }).catch(() => { this.state = 'error'; this.cbS?.(); });
+    if (!this.PC) loadP().then(() => { this.PC = (window as any).Peer; this.init(); }).catch(() => { this.state = 'error'; this.errorMessage = 'فشل تحميل PeerJS'; this.cbS?.(); });
     else this.init();
   }
 
-  private init() {
+  private init(attempt: number = 0) {
     if (this.dead) return;
+    console.log('[A] Init attempt', attempt, 'PeerID:', this.adminPeerId);
     try {
-      this.peer = new this.PC(undefined, getCfg());
-      this.peer.on('open', (id: string) => { this.adminPeerId = id; this.state = 'ready'; console.log('[A] Ready:', id); this.cbS?.(); });
-      this.peer.on('connection', (c: any) => { console.log('[A] Conn from:', c.peer); c.on('open', () => this.hConn(c)); });
-      this.peer.on('error', (e: any) => { console.error('[A] err:', e.type); this.state = 'error'; this.cbS?.(); });
+      this.peer = new this.PC(this.adminPeerId, getCfg());
+      this.peer.on('open', () => { this.state = 'ready'; console.log('[A] Ready:', this.adminPeerId); this.cbS?.(); });
+      this.peer.on('connection', (c: any) => {
+        console.log('[A] Conn from:', c.peer);
+        c.on('open', () => this.hConn(c));
+      });
+      this.peer.on('error', (e: any) => {
+        console.error('[A] err:', e.type);
+        if (e.type === 'unavailable-id' && attempt < 12) {
+          this.errorMessage = `الرمز ${this.roomCode} مستخدم حالياً، إعادة المحاولة...`;
+          this.state = 'connecting';
+          this.cbS?.();
+          setTimeout(() => { if (!this.dead) { sd(this.peer); this.init(attempt + 1); } }, 5000);
+        } else if (e.type === 'unavailable-id') {
+          this.state = 'error';
+          this.errorMessage = `الرمز ${this.roomCode} غير متاح. جرب رمزاً آخراً.`;
+          this.cbS?.();
+        } else {
+          this.state = 'error';
+          this.errorMessage = 'خطأ في الاتصال: ' + e.type;
+          this.cbS?.();
+        }
+      });
       this.peer.on('disconnected', () => { this.peer?.reconnect(); });
-    } catch (e) { this.state = 'error'; this.cbS?.(); }
+    } catch (e) { this.state = 'error'; this.errorMessage = 'خطأ فادح في إنشاء الغرفة'; this.cbS?.(); }
   }
 
   private async hConn(c: any) {
     const e = { conn: c, off: 0 };
     this.L.set(c.peer, e);
-    try { const r = await this.calib(c); e.off = r; console.log('[A] Clock:', r); } catch {}
+    try { const r = await this.calib(c); e.off = r; console.log('[A] Clock offset:', r); } catch {}
     c.on('close', () => { this.L.delete(c.peer); this.cbS?.(); });
     c.on('error', () => { this.L.delete(c.peer); this.cbS?.(); });
     c.on('data', (msg: any) => { if (msg.t === 'requestSync') this.sndAll(c); });
-    console.log('[A] Sending', this.songs.size, 'songs');
+    console.log('[A] Sending', this.songs.size, 'songs to', c.peer);
     this.sndAll(c);
     this.cbN?.(c.peer); this.cbS?.();
   }
@@ -96,6 +122,7 @@ export class AdminSync {
     const ts = now();
     this.L.forEach((e: any) => { if (e.conn.open) e.conn.send({ t: 'cmd', action, songId, time, ts, offset: e.off }); });
   }
+
   getListenerCount(): number { let c = 0; this.L.forEach((e: any) => { if (e.conn?.open) c++; }); return c; }
   onStateChange(cb: () => void) { this.cbS = cb; }
   onNewListener(cb: (id: string) => void) { this.cbN = cb; }
@@ -109,7 +136,7 @@ export class AdminSync {
         const h = (msg: any) => { if (msg.t === 'csr' && Math.abs(msg.tm - t0) < 1) { c.off('data', h); res(now()); } };
         c.on('data', h); setTimeout(() => { c.off('data', h); res(t0); }, 800);
       });
-      if (r > t0) { const rtt = r - t0; o.push(t0 + rtt / 2 - ((await new Promise((res) => setTimeout(() => res(0), 0))) || 0)); }
+      if (r > t0) { const rtt = r - t0; o.push(t0 + rtt / 2); }
       const rp = await new Promise<{ t2: number; l1: number }>((res) => {
         const h2 = (msg: any) => { if (msg.t === 'csr' && Math.abs(msg.tm - t0) < 1) { c.off('data', h2); res({ t2: r || now(), l1: msg.l1 }); } };
         c.on('data', h2); setTimeout(() => { c.off('data', h2); res({ t2: t0, l1: 0 }); }, 800);
@@ -137,8 +164,9 @@ export class ListenerSync {
 
   constructor() { this.PC = (window as any).Peer; }
 
-  async connect(adminPeerId: string, knownSongIds: string[]) {
-    console.log('[L] connect to:', adminPeerId);
+  async connect(roomCode: string, knownSongIds: string[]) {
+    const adminPeerId = `sw_${roomCode}`;
+    console.log('[L] connect to room:', roomCode, 'admin:', adminPeerId);
     this.state = 'connecting'; this.dead = false; this.rx.clear();
     if (this.timer) clearTimeout(this.timer);
     try { if (!this.PC) { await loadP(); this.PC = (window as any).Peer; } this.init(adminPeerId, knownSongIds); }
@@ -160,7 +188,7 @@ export class ListenerSync {
     console.log('[L] peer.connect to', aid);
     this.conn = this.peer.connect(aid, { reliable: true, serialization: 'json' });
     const to = setTimeout(() => { if (this.conn.open || this.dead) return; console.log('[L] Timeout'); this.conn.close(); if (att < 3) setTimeout(() => this.dc(aid, kids, att + 1), 3000); else { this.state = 'error'; this.cbState?.(); } }, 15000);
-    this.conn.on('open', () => { clearTimeout(to); console.log('[L] ✅ CONNECTED!'); this.state = 'syncing'; this.cbState?.(); this.conn.send({ t: 'requestSync', kids }); this.timer = setTimeout(() => { if (this.state === 'syncing' && !this.dead) { console.log('[L] Force ready'); this.state = 'ready'; this.cbState?.(); } }, 10000); });
+    this.conn.on('open', () => { clearTimeout(to); console.log('[L] Connected!'); this.state = 'syncing'; this.cbState?.(); this.conn.send({ t: 'requestSync', kids }); this.timer = setTimeout(() => { if (this.state === 'syncing' && !this.dead) { console.log('[L] Force ready'); this.state = 'ready'; this.cbState?.(); } }, 10000); });
     this.conn.on('data', (msg: any) => this.onD(msg));
     this.conn.on('close', () => { clearTimeout(to); if (this.timer) clearTimeout(this.timer); if (!this.dead) { this.state = 'disconnected'; this.cbState?.(); } });
     this.conn.on('error', (e: any) => { clearTimeout(to); console.error('[L] Conn err:', e); });
@@ -170,11 +198,22 @@ export class ListenerSync {
     switch (msg.t) {
       case 'sm': { console.log('[L] Meta:', msg.meta.title); this.rx.set(msg.meta.id, { m: msg.meta, c: new Array(msg.meta.tc).fill(''), r: 0 }); break; }
       case 'sc': { const r = this.rx.get(msg.sid); if (r && msg.idx < r.c.length) { r.c[msg.idx] = msg.d; r.r++; } break; }
-      case 'sdone': { const r = this.rx.get(msg.sid); if (!r) return; const bad = r.c.map((c: string, i: number) => c === '' ? i : -1).filter((i: number) => i >= 0); if (bad.length) { console.warn('[L] Missing chunks'); this.rx.delete(msg.sid); break; } const song = { ...r.m, fileData: r.c.join(''), createdAt: Date.now() }; this.rx.delete(msg.sid); console.log('[L] ✅ Song:', song.title); this.cbSong?.(song); if (this.state === 'syncing') { this.state = 'ready'; this.cbState?.(); } break; }
-      case 'sd': { console.log('[L] ✅ syncDone!'); if (this.timer) clearTimeout(this.timer); if (this.state === 'syncing' && !this.dead) { this.state = 'ready'; this.cbState?.(); } break; }
+      case 'sdone': {
+        const r = this.rx.get(msg.sid);
+        if (!r) return;
+        const bad = r.c.map((c: string, i: number) => c === '' ? i : -1).filter((i: number) => i >= 0);
+        if (bad.length) { console.warn('[L] Missing chunks:', bad); this.rx.delete(msg.sid); break; }
+        const song = { ...r.m, fileData: r.c.join(''), createdAt: Date.now() };
+        this.rx.delete(msg.sid);
+        console.log('[L] Song complete:', song.title);
+        this.cbSong?.(song);
+        if (this.state === 'syncing') { this.state = 'ready'; this.cbState?.(); }
+        break;
+      }
+      case 'sd': { console.log('[L] syncDone!'); if (this.timer) clearTimeout(this.timer); if (this.state === 'syncing' && !this.dead) { this.state = 'ready'; this.cbState?.(); } break; }
       case 'cmd': { this.cbCmd?.({ ...msg, _listenerOffset: msg.offset || 0 }); break; }
       case 'cs': { this.conn?.send({ t: 'csr', tm: msg.tm, l1: now() }); break; }
-      default: console.log('[L] Unknown:', msg.t);
+      default: console.log('[L] Unknown msg:', msg.t);
     }
   }
 

@@ -3,8 +3,8 @@ import { useNavigate, useSearchParams } from 'react-router';
 import { motion, AnimatePresence } from 'framer-motion';
 import { ListenerSync, getSyncedTime } from '@/lib/peerSync';
 import {
-  Headphones, Unlink, ArrowLeft, Volume2, Volume1, VolumeX,
-  Loader2, Wifi, Music, Radio, Activity
+  Headphones, ArrowLeft, Volume2, Volume1, VolumeX,
+  Loader2, Wifi, Music, Radio, Activity, LogIn
 } from 'lucide-react';
 
 interface Song {
@@ -83,7 +83,8 @@ export default function Listener() {
   const syncRef = useRef<ListenerSync | null>(null);
   const pendingCmdRef = useRef<any>(null);
 
-  const [status, setStatus] = useState<'connecting' | 'syncing' | 'ready' | 'error' | 'disconnected'>('connecting');
+  const [status, setStatus] = useState<'idle' | 'connecting' | 'syncing' | 'ready' | 'error' | 'disconnected'>('idle');
+  const [roomCode, setRoomCode] = useState('');
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(() => { const s = localStorage.getItem('sw_lvol'); return s ? parseFloat(s) : 0.8; });
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
@@ -92,15 +93,11 @@ export default function Listener() {
   const [progress, setProgress] = useState(0);
   const [trackName, setTrackName] = useState('');
   const [songCount, setSongCount] = useState(0);
-  const [latency, setLatency] = useState(0);
-  const [adminPeerId, setAdminPeerId] = useState('');
   const [searchParams] = useSearchParams();
 
-  // Load cached songs
+  // Load cached songs count
   useEffect(() => {
-    dbGetAllSongs().then(songs => {
-      setSongCount(songs.length);
-    });
+    dbGetAllSongs().then(songs => setSongCount(songs.length));
   }, []);
 
   // Audio
@@ -121,14 +118,23 @@ export default function Listener() {
   useEffect(() => { if (audioRef.current) audioRef.current.volume = volume; }, [volume]);
   useEffect(() => { localStorage.setItem('sw_lvol', volume.toString()); }, [volume]);
 
-  // Connect to admin
-  const connectToAdmin = useCallback((peerId: string) => {
-    if (!peerId) return;
+  // Auto-connect from URL ?room=CODE
+  useEffect(() => {
+    const code = searchParams.get('room');
+    if (code && code.length === 3) {
+      setRoomCode(code);
+      connectToRoom(code);
+    }
+  }, [searchParams]);
+
+  // Connect to room
+  const connectToRoom = useCallback((code: string) => {
+    if (!code || code.length !== 3) return;
     const sync = new ListenerSync();
     syncRef.current = sync;
 
     sync.onStateChange(() => {
-      setStatus(sync.state as any);
+      setStatus(sync.state === 'connecting' ? 'connecting' : sync.state === 'syncing' ? 'syncing' : sync.state === 'ready' ? 'ready' : sync.state === 'disconnected' ? 'disconnected' : 'error');
     });
 
     sync.onSong(async (song) => {
@@ -143,18 +149,9 @@ export default function Listener() {
     sync.onCmd((cmd) => executeCmd(cmd));
 
     dbGetAllSongs().then(songs => {
-      sync.connect(peerId, songs.map(s => s.id));
+      sync.connect(code, songs.map(s => s.id));
     });
   }, []);
-
-  // Auto-connect from URL
-  useEffect(() => {
-    const peerId = searchParams.get('admin');
-    if (peerId) {
-      setAdminPeerId(peerId);
-      connectToAdmin(peerId);
-    }
-  }, [searchParams, connectToAdmin]);
 
   const executeCmd = useCallback((cmd: any) => {
     const a = audioRef.current;
@@ -210,44 +207,23 @@ export default function Listener() {
   const disconnect = () => {
     syncRef.current?.disconnect();
     if (audioRef.current) { audioRef.current.pause(); audioRef.current.src = ''; }
-    setStatus('disconnected');
+    setStatus('idle');
     setIsPlaying(false);
     setCurrentSong(null);
     setTrackName('');
   };
 
-  const reconnect = () => {
-    syncRef.current?.disconnect();
-    setStatus('connecting');
-    const sync = new ListenerSync();
-    syncRef.current = sync;
-
-    sync.onStateChange(() => {
-      setStatus(sync.state as any);
-      // latency tracking removed
-    });
-
-    sync.onSong(async (song) => {
-      await dbSaveSong(song);
-      setSongCount(prev => prev + 1);
-    });
-
-    sync.onCmd((cmd) => executeCmd(cmd));
-
-    dbGetAllSongs().then(songs => sync.connect(adminPeerId, songs.map(s => s.id)));
+  const statusConfig: Record<string, { color: string; label: string; icon: any; sublabel: string }> = {
+    idle: { color: '#555555', label: 'في الانتظار', icon: <Headphones className="w-8 h-8" />, sublabel: 'أدخل رمز الغرفة للانضمام' },
+    connecting: { color: '#FFAA00', label: 'جاري الاتصال...', icon: <Loader2 className="w-8 h-8 animate-spin" />, sublabel: 'يتصل بالمسؤول' },
+    syncing: { color: '#FFAA00', label: 'جاري التحميل...', icon: <Loader2 className="w-8 h-8 animate-spin" />, sublabel: `تحميل الأغاني (${songCount})` },
+    ready: { color: '#00FF66', label: 'متصل', icon: <Wifi className="w-8 h-8" />, sublabel: 'بث مباشر — في انتظار التشغيل' },
+    disconnected: { color: '#FF3366', label: 'انقطع الاتصال', icon: <Activity className="w-8 h-8" />, sublabel: 'انقطع الاتصال بالمسؤول' },
+    error: { color: '#FF3366', label: 'خطأ في الاتصال', icon: <Activity className="w-8 h-8" />, sublabel: 'تأكد من الرمز وحاول مرة أخرى' },
   };
 
-  const volIcon = volume === 0 ? <VolumeX className="w-4 h-4" /> : volume < 0.5 ? <Volume1 className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />;
-
-  const statusConfig: Record<string, { color: string; label: string; icon: any }> = {
-    connecting: { color: '#FFAA00', label: 'جاري الاتصال...', icon: <Loader2 className="w-8 h-8 animate-spin" /> },
-    syncing: { color: '#FFAA00', label: 'جاري التحميل...', icon: <Loader2 className="w-8 h-8 animate-spin" /> },
-    ready: { color: '#00FF66', label: 'متزامن', icon: <Wifi className="w-8 h-8" /> },
-    disconnected: { color: '#FF3366', label: 'انقطع الاتصال', icon: <Activity className="w-8 h-8" /> },
-    error: { color: '#FF3366', label: 'خطأ في الاتصال', icon: <Activity className="w-8 h-8" /> },
-  };
-
-  const sc = statusConfig[status] || statusConfig.connecting;
+  const sc = statusConfig[status] || statusConfig.idle;
+  const isConnected = status === 'ready' || status === 'syncing';
 
   return (
     <div className="min-h-[100dvh] bg-[#0A0A0A] text-white font-['Tajawal'] flex flex-col" dir="rtl">
@@ -278,97 +254,97 @@ export default function Listener() {
           </div>
         </div>
 
-        {/* Input PeerID or show connected */}
-        <div className="text-center mb-4 w-full max-w-sm">
-          {status === 'connecting' || status === 'syncing' ? (
-            <div className="flex items-center justify-center gap-2 text-[10px] text-[#555555] font-mono mb-1">
-              <Radio className="w-3 h-3" />
-              {adminPeerId}
+        {/* Room Code Input OR Connected Status */}
+        {status === 'idle' || status === 'error' || status === 'disconnected' ? (
+          <div className="text-center w-full max-w-xs">
+            <h2 className="font-bold text-lg mb-1">أدخل رمز الغرفة</h2>
+            <p className="text-[#555555] text-xs mb-4">اطلب الرمز من 3 أرقام من المسؤول</p>
+            <div className="flex gap-2 justify-center mb-3">
+              {[0, 1, 2].map(i => (
+                <input
+                  key={i}
+                  id={`code-${i}`}
+                  type="text"
+                  maxLength={1}
+                  inputMode="numeric"
+                  value={roomCode[i] || ''}
+                  onChange={e => {
+                    const v = e.target.value.replace(/\D/g, '');
+                    if (!v) return;
+                    const newCode = roomCode.slice(0, i) + v[0] + roomCode.slice(i + 1);
+                    setRoomCode(newCode.slice(0, 3));
+                    if (i < 2 && v) document.getElementById(`code-${i + 1}`)?.focus();
+                  }}
+                  onKeyDown={e => {
+                    if (e.key === 'Backspace' && !roomCode[i] && i > 0) {
+                      document.getElementById(`code-${i - 1}`)?.focus();
+                    }
+                    if (e.key === 'Enter' && roomCode.length === 3) {
+                      connectToRoom(roomCode);
+                    }
+                  }}
+                  className="w-14 h-16 bg-[#111111] border-2 border-[#222222] rounded-xl text-center text-2xl font-bold font-mono text-white focus:border-[#FF00FF] focus:outline-none transition-colors"
+                />
+              ))}
             </div>
-          ) : (
-            <div className="space-y-2">
-              <input
-                type="text"
-                value={adminPeerId}
-                onChange={e => setAdminPeerId(e.target.value)}
-                placeholder="أدخل معرف الغرفة من المسؤول"
-                className="w-full bg-[#111111] border border-[#222222] rounded-xl px-4 py-3 text-center text-white placeholder-[#555555] focus:border-[#FF00FF] focus:outline-none text-sm font-mono"
-                onKeyDown={e => e.key === 'Enter' && adminPeerId.trim() && connectToAdmin(adminPeerId.trim())}
-              />
-              <button
-                onClick={() => adminPeerId.trim() && connectToAdmin(adminPeerId.trim())}
-                disabled={!adminPeerId.trim()}
-                className="w-full bg-[#FF00FF] hover:bg-[#FF00FF]/80 disabled:opacity-40 disabled:cursor-not-allowed text-[#0A0A0A] font-bold py-2.5 rounded-xl active:scale-[0.98] transition-all text-sm"
-              >
-                اتصال
+            <button
+              onClick={() => roomCode.length === 3 && connectToRoom(roomCode)}
+              disabled={roomCode.length !== 3}
+              className="w-full bg-[#FF00FF] hover:bg-[#FF00FF]/80 disabled:opacity-40 disabled:cursor-not-allowed text-[#0A0A0A] font-bold py-3 rounded-xl active:scale-[0.98] transition-all text-sm flex items-center justify-center gap-2"
+            >
+              <LogIn className="w-4 h-4" />
+              اتصال
+            </button>
+          </div>
+        ) : (
+          <div className="text-center w-full max-w-xs">
+            <h2 className="font-bold text-lg mb-1" style={{ color: sc.color }}>{sc.label}</h2>
+            <p className="text-[#555555] text-xs mb-4">{sc.sublabel}</p>
+            {status === 'connecting' && (
+              <p className="text-[10px] text-[#555555] font-mono mb-1">sw_{roomCode}</p>
+            )}
+
+            {/* Track Info */}
+            <div className="mb-6">
+              <div className="w-20 h-20 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-[#FF00FF]/30 to-[#00F0FF]/30 flex items-center justify-center">
+                {currentSong ? <Music className="w-10 h-10 text-white/80" /> : <Headphones className="w-10 h-10 text-white/80" />}
+              </div>
+              <h3 className="font-bold text-lg mb-1">{trackName || 'في انتظار البث...'}</h3>
+              <div className="flex items-center justify-center gap-3">
+                <span className="text-[#00FF66] text-xs flex items-center gap-1"><Wifi className="w-3.5 h-3.5" /> متصل</span>
+                <span className="text-[#555555] text-xs">{songCount} أغنية</span>
+              </div>
+              {!currentSong && status === 'ready' && (
+                <p className="text-[#555555] text-xs mt-3">سيبدأ التشغيل تلقائياً عندما يشغل المسؤول أغنية</p>
+              )}
+            </div>
+
+            {/* Progress */}
+            {currentSong && (
+              <div className="mb-6 px-4">
+                <div className="flex items-center justify-between text-[10px] text-[#A0A0A0] mb-1">
+                  <span>{fmtDuration(currentTime)}</span>
+                  <span>{fmtDuration(duration)}</span>
+                </div>
+                <div className="w-full h-1 bg-[#333333] rounded-full overflow-hidden">
+                  <div className="h-full bg-[#FF00FF] rounded-full transition-all" style={{ width: `${progress}%` }} />
+                </div>
+              </div>
+            )}
+
+            {/* Volume + Disconnect */}
+            <div className="flex items-center gap-3 justify-center">
+              {volume === 0 ? <VolumeX className="w-4 h-4 text-[#A0A0A0]" /> : volume < 0.5 ? <Volume1 className="w-4 h-4 text-[#A0A0A0]" /> : <Volume2 className="w-4 h-4 text-[#A0A0A0]" />}
+              <input type="range" min={0} max={1} step={0.01} value={volume}
+                onChange={e => setVolume(Number(e.target.value))}
+                className="w-24 h-1 bg-[#333333] rounded-full appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-2.5 [&::-webkit-slider-thumb]:h-2.5 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#A0A0A0]" />
+              <button onClick={disconnect} className="text-[#FF3366] text-xs hover:text-[#FF3366]/80 transition-colors mr-2">
+                <Radio className="w-4 h-4 inline ml-1" />
+                قطع
               </button>
             </div>
-          )}
-        </div>
-
-        <AnimatePresence mode="wait">
-          {/* Connecting / Syncing */}
-          {(status === 'connecting' || status === 'syncing') && (
-            <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-center">
-              <p className="text-sm font-bold mb-1" style={{ color: sc.color }}>{sc.label}</p>
-              <p className="text-[#555555] text-xs">{songCount} أغنية مخزنة</p>
-            </motion.div>
-          )}
-
-          {/* Ready / Playing */}
-          {(status === 'ready' || status === 'disconnected' || status === 'error') && (
-            <motion.div key="ready" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="w-full max-w-sm text-center">
-              {/* Track Info */}
-              <div className="mb-6">
-                <div className="w-20 h-20 mx-auto mb-4 rounded-2xl bg-gradient-to-br from-[#FF00FF]/30 to-[#00F0FF]/30 flex items-center justify-center">
-                  {currentSong ? <Music className="w-10 h-10 text-white/80" /> : <Headphones className="w-10 h-10 text-white/80" />}
-                </div>
-                <h3 className="font-bold text-lg mb-1">{trackName || 'في انتظار البث...'}</h3>
-                <div className="flex items-center justify-center gap-3">
-                  <span className="text-[#00FF66] text-xs flex items-center gap-1"><Wifi className="w-3.5 h-3.5" /> متصل</span>
-                  <span className="text-[#555555] text-xs">{songCount} أغنية</span>
-                </div>
-                {!currentSong && status === 'ready' && (
-                  <p className="text-[#555555] text-xs mt-3">سيبدأ التشغيل تلقائياً عندما يشغل المسؤول أغنية</p>
-                )}
-              </div>
-
-              {/* Progress (read-only) */}
-              {currentSong && (
-                <div className="mb-6 px-4">
-                  <div className="flex items-center justify-between text-[10px] text-[#A0A0A0] mb-1">
-                    <span>{fmtDuration(currentTime)}</span>
-                    <span>{fmtDuration(duration)}</span>
-                  </div>
-                  <div className="h-1 bg-[#333333] rounded-full overflow-hidden">
-                    <motion.div className="h-full bg-[#FF00FF] rounded-full" style={{ width: `${progress}%` }} />
-                  </div>
-                </div>
-              )}
-
-              {/* Volume only */}
-              <div className="flex items-center gap-3 justify-center mb-6 max-w-[200px] mx-auto">
-                <span className="text-[#A0A0A0]">{volIcon}</span>
-                <input type="range" min={0} max={1} step={0.01} value={volume}
-                  onChange={e => setVolume(Number(e.target.value))}
-                  className="flex-1 h-1 bg-[#333333] rounded-full appearance-none [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-[#FF00FF]"
-                  style={{ background: `linear-gradient(to left, #FF00FF ${volume * 100}%, #333333 ${volume * 100}%)` }} />
-              </div>
-
-              {/* Actions */}
-              <div className="flex items-center justify-center gap-3">
-                {status === 'disconnected' || status === 'error' ? (
-                  <button onClick={reconnect} className="flex items-center gap-2 text-[#FFAA00] text-sm hover:bg-[#FFAA00]/10 px-4 py-2 rounded-lg transition-colors">
-                    <Activity className="w-4 h-4" /> إعادة الاتصال
-                  </button>
-                ) : null}
-                <button onClick={disconnect} className="flex items-center gap-2 text-[#FF3366] text-sm hover:bg-[#FF3366]/10 px-4 py-2 rounded-lg transition-colors">
-                  <Unlink className="w-4 h-4" /> قطع الاتصال
-                </button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
+          </div>
+        )}
       </div>
     </div>
   );
