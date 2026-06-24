@@ -246,6 +246,8 @@ export default function Admin() {
     navigator.clipboard.writeText(roomCode).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }).catch(() => {});
   };
 
+  const inviteUrl = typeof window !== 'undefined' ? `${window.location.origin}/#/listener?room=${roomCode}` : '';
+
   return (
     <div className="min-h-[100dvh] bg-[#0A0A0A] text-white font-['Tajawal'] pb-40" dir="rtl">
       <audio ref={audioRef} crossOrigin="anonymous" playsInline preload="auto" />
@@ -280,6 +282,15 @@ export default function Admin() {
           </div>
           <p className="text-[#555555] text-[10px]">المستمع يدخل هذا الرمز للانضمام</p>
           {syncError && <p className="text-[#FF3366] text-xs mt-2">{syncError}</p>}
+          {syncState === 'ready' && inviteUrl && (
+            <div className="mt-3 pt-3 border-t border-[#333333]">
+              <p className="text-[#555555] text-[10px] mb-1">رابط الدعوة للمستمعين:</p>
+              <div className="flex items-center gap-2 bg-[#0A0A0A] rounded-lg px-2 py-1.5">
+                <span className="text-[10px] text-[#A0A0A0] font-mono truncate flex-1 text-right">{inviteUrl}</span>
+                <button onClick={() => navigator.clipboard.writeText(inviteUrl).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); })} className="text-[#00F0FF] text-[10px] font-bold flex-shrink-0">نسخ</button>
+              </div>
+            </div>
+          )}
         </motion.div>
 
         {/* Stats */}
