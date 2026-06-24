@@ -10,7 +10,21 @@ const ICE_SERVERS = [
   { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
 ];
 
-function getCfg() { return { config: { iceServers: ICE_SERVERS, iceCandidatePoolSize: 10 }, debug: 2 }; }
+// Use our own PeerServer instead of PeerJS Cloud Broker
+const BROKER_URL = typeof window !== 'undefined'
+  ? `${window.location.protocol}//${window.location.host}/peer`
+  : '';
+
+function getCfg() {
+  return {
+    host: window.location.hostname,
+    path: '/peer',
+    port: window.location.port || (window.location.protocol === 'https:' ? 443 : 80),
+    secure: window.location.protocol === 'https:',
+    config: { iceServers: ICE_SERVERS, iceCandidatePoolSize: 10 },
+    debug: 2,
+  };
+}
 export function now() { return performance.now(); }
 
 function loadP(): Promise<void> {
