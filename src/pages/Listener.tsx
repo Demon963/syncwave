@@ -166,7 +166,7 @@ function CodeInput({ onSubmit, disabled }: { onSubmit: (code: string) => void; d
             maxLength={1}
             value={digits[i]}
             disabled={disabled}
-            onChange={() => {}}
+            onChange={e => { e.preventDefault(); setDigit(i, e.target.value); }}
             onKeyDown={e => handleKeyDown(i, e)}
             onFocus={() => setFocused(i)}
             className={`
