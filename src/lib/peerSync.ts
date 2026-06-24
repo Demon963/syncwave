@@ -10,21 +10,7 @@ const ICE_SERVERS = [
   { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
 ];
 
-// Use our own PeerServer instead of PeerJS Cloud Broker
-const BROKER_URL = typeof window !== 'undefined'
-  ? `${window.location.protocol}//${window.location.host}/peer`
-  : '';
-
-function getCfg() {
-  return {
-    host: window.location.hostname,
-    path: '/peer',
-    port: window.location.port || (window.location.protocol === 'https:' ? 443 : 80),
-    secure: window.location.protocol === 'https:',
-    config: { iceServers: ICE_SERVERS, iceCandidatePoolSize: 10 },
-    debug: 2,
-  };
-}
+function getCfg() { return { config: { iceServers: ICE_SERVERS, iceCandidatePoolSize: 10 }, debug: 2 }; }
 export function now() { return performance.now(); }
 
 function loadP(): Promise<void> {
@@ -219,7 +205,7 @@ export class ListenerSync {
 
   private dc(aid: string, kids: string[], att: number) {
     if (this.dead) return;
-    console.log('[L] Connecting to admin:', aid, 'attempt:', att);
+    console.log('[L] Connecting to admin:', aid, 'attempt:', att + 1);
     try {
       this.conn = this.peer.connect(aid, { reliable: true });
     } catch (e) { console.error('[L] peer.connect threw:', e); this.retryOrFail(aid, kids, att); return; }
@@ -227,17 +213,17 @@ export class ListenerSync {
     let connected = false;
     const to = setTimeout(() => {
       if (connected || this.dead) return;
-      console.log('[L] Connection timeout, attempt', att);
+      console.log('[L] Timeout attempt', att + 1);
       try { this.conn.close(); } catch {}
       this.retryOrFail(aid, kids, att);
-    }, 12000);
+    }, 15000);
 
     this.conn.on('open', () => {
       connected = true; clearTimeout(to);
-      console.log('[L] Connected to admin!');
+      console.log('[L] Connected!');
       this.state = 'syncing'; this.cbState?.();
       try { this.conn.send({ t: 'requestSync', kids }); } catch (e) { console.error('[L] Send error:', e); }
-      this.timer = setTimeout(() => { if (this.state === 'syncing' && !this.dead) { console.log('[L] Force ready (no songs)'); this.state = 'ready'; this.cbState?.(); } }, 10000);
+      this.timer = setTimeout(() => { if (this.state === 'syncing' && !this.dead) { console.log('[L] Force ready'); this.state = 'ready'; this.cbState?.(); } }, 8000);
     });
 
     this.conn.on('data', (msg: any) => this.onD(msg));
@@ -250,18 +236,23 @@ export class ListenerSync {
     });
 
     this.conn.on('error', (e: any) => {
-      clearTimeout(to); console.error('[L] Conn error:', e);
+      clearTimeout(to);
+      console.error('[L] Conn error:', e.type || e);
       if (!connected) this.retryOrFail(aid, kids, att);
     });
   }
 
   private retryOrFail(aid: string, kids: string[], att: number) {
-    if (att < 5) {
-      console.log('[L] Retrying in 3s...');
-      setTimeout(() => { if (!this.dead) this.dc(aid, kids, att + 1); }, 3000);
+    if (att < 8) {
+      const delay = Math.min(2000 + att * 1000, 8000);
+      console.log(`[L] Retry ${att + 2}/9 in ${delay}ms`);
+      setTimeout(() => { if (!this.dead) this.dc(aid, kids, att + 1); }, delay);
     } else {
-      console.log('[L] All retries exhausted');
-      this.state = 'error'; this.errorMessage = 'لا يوجد مسؤول بهذا الرمز. تأكد من الرمز وأن المسؤول متصل.'; this.cbState?.();
+      console.log('[L] All retries failed');
+      sd(this.peer);
+      this.state = 'error';
+      this.errorMessage = 'تعذر الاتصال بالمسؤول. تأكد أن الرمز صحيح وأن المسؤول متصل بالإنترنت.';
+      this.cbState?.();
     }
   }
 
