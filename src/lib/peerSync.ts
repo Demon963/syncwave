@@ -1,17 +1,12 @@
 /**
- * SyncWave P2P Sync Engine v3 — Enhanced
- * - Persistent PeerID via localStorage
- * - NTP-style time sync (multi-round ping/pong)
- * - Admin-to-Admin song sync
- * - Room discovery
+ * SyncWave P2P — Ultra Simple v3.2
+ * One fixed room. Admin = broadcaster. Listener = auto-connects.
  */
 
 import type { Song } from './db';
 
-// ─── Constants ──────────────────────────────────────────
-
 const PEERJS_CDN = 'https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js';
-const PEERID_KEY = 'syncwave_peerid_v3';
+export const FIXED_ROOM_ID = 'syncwave-room-1';
 const ADMIN_PASSWORD = '123';
 
 // ─── Types ──────────────────────────────────────────────
@@ -21,8 +16,7 @@ export type SyncCmd = {
   action: 'play' | 'pause' | 'seek' | 'track';
   songId: string;
   time: number;
-  timestamp: number;
-  serverTime: number;
+  ts: number;
 };
 
 export type SyncMessage =
@@ -30,20 +24,16 @@ export type SyncMessage =
   | { type: 'syncSongs'; songs: Song[] }
   | { type: 'syncConfirm'; ids: string[] }
   | { type: 'newSong'; song: Song }
-  | { type: 'requestAllSongs' }
-  | { type: 'allSongs'; songs: Song[] }
   | SyncCmd
   | { type: 'ping'; t: number }
-  | { type: 'pong'; t: number; senderT: number }
-  | { type: 'latencyProbe'; round: number; t: number }
-  | { type: 'latencyReply'; round: number; t: number; serverT: number };
+  | { type: 'pong'; t: number; serverT: number };
 
 export interface ListenerInfo {
   id: string;
   conn: any;
   latency: number;
   songs: Set<string>;
-  status: 'syncing' | 'ready' | 'error';
+  status: 'syncing' | 'ready';
 }
 
 // ─── Helpers ────────────────────────────────────────────
@@ -51,101 +41,36 @@ export interface ListenerInfo {
 function loadPeerJS(): Promise<void> {
   return new Promise((resolve, reject) => {
     if ((window as any).Peer) { resolve(); return; }
-    const script = document.createElement('script');
-    script.src = PEERJS_CDN;
-    script.crossOrigin = 'anonymous';
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error('Failed to load PeerJS'));
-    document.head.appendChild(script);
+    const s = document.createElement('script');
+    s.src = PEERJS_CDN;
+    s.crossOrigin = 'anonymous';
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('PeerJS load failed'));
+    document.head.appendChild(s);
   });
 }
 
-function getStoredPeerId(): string | null {
-  try { return localStorage.getItem(PEERID_KEY); } catch { return null; }
+export function verifyAdminPassword(input: string): boolean {
+  return input === ADMIN_PASSWORD;
 }
 
-function storePeerId(id: string) {
-  try { localStorage.setItem(PEERID_KEY, id); } catch {}
+// ─── Time Sync ──────────────────────────────────────────
+
+export function getSyncedTime(cmd: { time: number; ts: number }): number {
+  const delay = Math.max(0, (Date.now() - cmd.ts) / 2000);
+  return Math.max(0, cmd.time + delay);
 }
 
-function generatePeerId(): string {
-  const existing = getStoredPeerId();
-  if (existing) return existing;
-  const newId = 'sw_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
-  storePeerId(newId);
-  return newId;
-}
-
-// ─── NTP Time Sync ──────────────────────────────────────
-
-export class TimeSync {
-  private offset: number = 0;       // server time - local time
-  private drift: number = 0;        // ms drift per second
-  private samples: number = 0;
-  private lastSync: number = 0;
-
-  async performSync(sendPing: (t: number) => void, getPong: () => Promise<{ t: number; serverT: number }>): Promise<void> {
-    // 5-round NTP-style sync
-    const rounds = 5;
-    let bestOffset = 0;
-    let minDelay = Infinity;
-
-    for (let i = 0; i < rounds; i++) {
-      const t0 = Date.now();
-      sendPing(t0);
-      
-      const pong = await Promise.race([
-        getPong(),
-        new Promise<{ t: number; serverT: number }>((_, reject) => 
-          setTimeout(() => reject(new Error('timeout')), 2000)
-        )
-      ]);
-      
-      const t3 = Date.now();
-      const delay = t3 - t0;
-      const offset = ((pong.serverT - t0) + (pong.serverT - t3)) / 2;
-
-      if (delay < minDelay) {
-        minDelay = delay;
-        bestOffset = offset;
-      }
-      
-      await new Promise(r => setTimeout(r, 200));
-    }
-
-    this.offset = bestOffset;
-    this.samples = rounds;
-    this.lastSync = Date.now();
-  }
-
-  getServerTime(): number {
-    const elapsed = (Date.now() - this.lastSync);
-    return Date.now() + this.offset + (elapsed * this.drift / 1000);
-  }
-
-  syncLocalToServer(serverTimestamp: number): number {
-    const localNow = Date.now();
-    this.offset = serverTimestamp - localNow;
-    this.lastSync = localNow;
-    return this.offset;
-  }
-
-  getOffset(): number { return this.offset; }
-}
-
-// ─── Admin Side ─────────────────────────────────────────
+// ─── Admin ──────────────────────────────────────────────
 
 export class AdminSync {
   private peer: any;
   private listeners: Map<string, ListenerInfo> = new Map();
   private onStateChangeCb?: () => void;
   private onNewListenerCb?: (info: ListenerInfo) => void;
-  private onSongRequestCb?: () => void;
-  public peerId: string = '';
+  public peerId: string = FIXED_ROOM_ID;
   public state: 'connecting' | 'ready' | 'error' = 'connecting';
   private PeerClass: any;
-  private timeSync: TimeSync = new TimeSync();
-  private pingCallbacks: Map<number, (pong: any) => void> = new Map();
 
   constructor() {
     this.PeerClass = (window as any).Peer;
@@ -164,24 +89,17 @@ export class AdminSync {
 
   private initPeer() {
     try {
-      const storedId = getStoredPeerId();
-      this.peer = new this.PeerClass(storedId || undefined);
-      
-      this.peer.on('open', (id: string) => {
-        this.peerId = id;
-        storePeerId(id);
+      this.peer = new this.PeerClass(FIXED_ROOM_ID);
+      this.peer.on('open', () => {
         this.state = 'ready';
         this.onStateChangeCb?.();
       });
-      
       this.peer.on('connection', (conn: any) => this.handleConnection(conn));
-      
       this.peer.on('error', (err: any) => {
         console.error('[Admin] Peer error:', err);
         if (err.type === 'unavailable-id') {
-          // ID taken — clear and regenerate
-          try { localStorage.removeItem(PEERID_KEY); } catch {}
-          setTimeout(() => this.initPeer(), 500);
+          // Another admin is already using this ID, wait and retry
+          setTimeout(() => this.initPeer(), 2000);
           return;
         }
         this.state = 'error';
@@ -197,20 +115,38 @@ export class AdminSync {
     const info: ListenerInfo = {
       id: conn.peer,
       conn,
-      latency: 100,
+      latency: 50,
       songs: new Set(),
       status: 'syncing',
     };
     this.listeners.set(conn.peer, info);
 
     conn.on('open', () => {
-      this.runLatencyProbe(info);
+      this.measureLatency(info);
       this.onNewListenerCb?.(info);
       this.onStateChangeCb?.();
     });
 
     conn.on('data', (msg: SyncMessage) => {
-      this.handleMessage(info, msg);
+      switch (msg.type) {
+        case 'requestSync': {
+          info.songs = new Set(msg.knownIds);
+          info.status = 'syncing';
+          this.onNewListenerCb?.(info);
+          break;
+        }
+        case 'syncConfirm': {
+          msg.ids.forEach(id => info.songs.add(id));
+          info.status = 'ready';
+          this.onStateChangeCb?.();
+          break;
+        }
+        case 'pong': {
+          const rtt = Date.now() - msg.t;
+          info.latency = Math.round(rtt / 2);
+          break;
+        }
+      }
     });
 
     conn.on('close', () => {
@@ -219,88 +155,24 @@ export class AdminSync {
     });
 
     conn.on('error', () => {
-      info.status = 'error';
       this.listeners.delete(conn.peer);
       this.onStateChangeCb?.();
     });
   }
 
-  private async runLatencyProbe(info: ListenerInfo) {
-    // Multi-round latency measurement
-    const rounds = 5;
-    const latencies: number[] = [];
-    
-    for (let i = 0; i < rounds; i++) {
-      const t0 = Date.now();
-      
-      if (!info.conn.open) return;
-      info.conn.send({ type: 'latencyProbe', round: i, t: t0 });
-      
-      try {
-        const reply = await this.waitForReply(i, 2000);
-        const t3 = Date.now();
-        const delay = t3 - t0;
-        const oneWay = delay / 2;
-        latencies.push(oneWay);
-      } catch {
-        // timeout, skip
-      }
-      
-      await new Promise(r => setTimeout(r, 150));
-    }
-
-    if (latencies.length > 0) {
-      // Use minimum latency (most optimistic — least congested)
-      info.latency = Math.min(...latencies);
-    }
-  }
-
-  private waitForReply(round: number, timeout: number): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pingCallbacks.delete(round);
-        reject(new Error('timeout'));
-      }, timeout);
-      
-      this.pingCallbacks.set(round, (msg) => {
-        clearTimeout(timer);
-        this.pingCallbacks.delete(round);
-        resolve(msg);
-      });
-    });
-  }
-
-  private handleMessage(info: ListenerInfo, msg: SyncMessage) {
-    switch (msg.type) {
-      case 'requestSync': {
-        info.songs = new Set(msg.knownIds);
-        info.status = 'syncing';
-        this.onSongRequestCb?.();
-        break;
-      }
-      case 'syncConfirm': {
-        msg.ids.forEach(id => info.songs.add(id));
-        info.status = 'ready';
-        this.onStateChangeCb?.();
-        break;
-      }
-      case 'pong': {
-        const rtt = Date.now() - msg.t;
-        info.latency = Math.round(rtt / 2);
-        break;
-      }
-      case 'latencyReply': {
-        const cb = this.pingCallbacks.get(msg.round);
-        if (cb) cb(msg);
-        break;
-      }
+  private measureLatency(info: ListenerInfo) {
+    for (let i = 0; i < 3; i++) {
+      setTimeout(() => {
+        if (info.conn.open) {
+          info.conn.send({ type: 'ping', t: Date.now() });
+        }
+      }, i * 500);
     }
   }
 
   sendSongs(listenerId: string, songs: Song[]) {
     const info = this.listeners.get(listenerId);
-    if (!info || !info.conn.open) return;
-    
+    if (!info?.conn.open) return;
     const newSongs = songs.filter(s => !info.songs.has(s.id));
     if (newSongs.length === 0) {
       info.conn.send({ type: 'syncSongs', songs: [] });
@@ -308,26 +180,19 @@ export class AdminSync {
       this.onStateChangeCb?.();
       return;
     }
-
-    // Send in batches with progress
-    const BATCH_SIZE = 1;
-    let index = 0;
-    
-    const sendBatch = () => {
-      if (index >= newSongs.length || !info.conn.open) {
-        if (index >= newSongs.length) {
-          info.status = 'ready';
-          this.onStateChangeCb?.();
-        }
+    let i = 0;
+    const send = () => {
+      if (i >= newSongs.length || !info.conn.open) {
+        info.status = 'ready';
+        this.onStateChangeCb?.();
         return;
       }
-      const batch = newSongs.slice(index, index + BATCH_SIZE);
-      info.conn.send({ type: 'syncSongs', songs: batch });
-      batch.forEach(s => info.songs.add(s.id));
-      index += BATCH_SIZE;
-      setTimeout(sendBatch, 50);
+      info.conn.send({ type: 'syncSongs', songs: [newSongs[i]] });
+      info.songs.add(newSongs[i].id);
+      i++;
+      setTimeout(send, 80);
     };
-    sendBatch();
+    send();
   }
 
   broadcastNewSong(song: Song) {
@@ -340,19 +205,11 @@ export class AdminSync {
   }
 
   sendCommand(action: 'play' | 'pause' | 'seek' | 'track', songId: string, time: number) {
-    const serverTime = Date.now();
-    const cmd: SyncCmd = {
-      type: 'cmd',
-      action,
-      songId,
-      time,
-      timestamp: serverTime,
-      serverTime,
-    };
+    const cmd: SyncCmd = { type: 'cmd', action, songId, time, ts: Date.now() };
     this.listeners.forEach(info => {
       if (info.conn.open) {
-        // Add per-listener latency compensation
-        const adjusted = { ...cmd, serverTime: serverTime + info.latency };
+        // Compensate per-listener latency
+        const adjusted: SyncCmd = { ...cmd, ts: Date.now() - info.latency };
         info.conn.send(adjusted);
       }
     });
@@ -368,7 +225,6 @@ export class AdminSync {
 
   onStateChange(cb: () => void) { this.onStateChangeCb = cb; }
   onNewListener(cb: (info: ListenerInfo) => void) { this.onNewListenerCb = cb; }
-  onSongRequest(cb: () => void) { this.onSongRequestCb = cb; }
 
   destroy() {
     this.listeners.forEach(l => l.conn.close());
@@ -376,25 +232,23 @@ export class AdminSync {
   }
 }
 
-// ─── Listener Side ──────────────────────────────────────
+// ─── Listener ───────────────────────────────────────────
 
 export class ListenerSync {
   private peer: any;
   private adminConn: any = null;
   public state: 'connecting' | 'syncing' | 'ready' | 'error' | 'disconnected' = 'connecting';
-  public latency: number = 100;
+  public latency: number = 50;
   private onSongCb?: (song: Song) => void;
   private onCmdCb?: (cmd: SyncCmd) => void;
   private onStateChangeCb?: () => void;
   private PeerClass: any;
-  private timeSync: TimeSync = new TimeSync();
-  private probeCallbacks: Map<number, (msg: any) => void> = new Map();
 
   constructor() {
     this.PeerClass = (window as any).Peer;
   }
 
-  async connect(adminPeerId: string, knownSongIds: string[]) {
+  async connect(knownSongIds: string[]) {
     this.state = 'connecting';
     this.onStateChangeCb?.();
 
@@ -407,18 +261,18 @@ export class ListenerSync {
       this.peer = new this.PeerClass();
 
       this.peer.on('open', () => {
-        const conn = this.peer.connect(adminPeerId, { reliable: true });
+        const conn = this.peer.connect(FIXED_ROOM_ID, { reliable: true });
         this.adminConn = conn;
 
         conn.on('open', () => {
           this.state = 'syncing';
           this.onStateChangeCb?.();
-          
-          // Run latency probe first
-          this.runLatencyProbe().then(() => {
-            // Then request songs
+          // Measure latency
+          this.runLatencyProbe();
+          // Request songs
+          setTimeout(() => {
             conn.send({ type: 'requestSync', knownIds: knownSongIds });
-          });
+          }, 300);
         });
 
         conn.on('data', (msg: SyncMessage) => {
@@ -428,6 +282,12 @@ export class ListenerSync {
         conn.on('close', () => {
           this.state = 'disconnected';
           this.onStateChangeCb?.();
+          // Auto-reconnect after 3 seconds
+          setTimeout(() => {
+            if (this.state === 'disconnected') {
+              this.connect(knownSongIds);
+            }
+          }, 3000);
         });
 
         conn.on('error', () => {
@@ -448,47 +308,15 @@ export class ListenerSync {
   }
 
   private async runLatencyProbe() {
-    const rounds = 5;
     const latencies: number[] = [];
-    
-    for (let i = 0; i < rounds; i++) {
+    for (let i = 0; i < 3; i++) {
       const t0 = Date.now();
-      
       if (!this.adminConn?.open) return;
-      this.adminConn.send({ type: 'latencyProbe', round: i, t: t0 });
+      this.adminConn.send({ type: 'ping', t: t0 });
       
-      try {
-        const reply = await this.waitForProbeReply(i, 2000);
-        const t3 = Date.now();
-        const delay = t3 - t0;
-        const offset = ((reply.serverT - t0) + (reply.serverT - t3)) / 2;
-        latencies.push(delay / 2);
-        this.timeSync.syncLocalToServer(reply.serverT);
-      } catch {
-        // timeout
-      }
-      
-      await new Promise(r => setTimeout(r, 150));
+      // Wait for pong (handled in handleMessage)
+      await new Promise(r => setTimeout(r, 400));
     }
-
-    if (latencies.length > 0) {
-      this.latency = Math.min(...latencies);
-    }
-  }
-
-  private waitForProbeReply(round: number, timeout: number): Promise<any> {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.probeCallbacks.delete(round);
-        reject(new Error('timeout'));
-      }, timeout);
-      
-      this.probeCallbacks.set(round, (msg) => {
-        clearTimeout(timer);
-        this.probeCallbacks.delete(round);
-        resolve(msg);
-      });
-    });
   }
 
   private handleMessage(msg: SyncMessage) {
@@ -513,21 +341,12 @@ export class ListenerSync {
         break;
       }
       case 'ping': {
-        this.adminConn?.send({ type: 'pong', t: msg.t, senderT: Date.now() });
+        this.adminConn?.send({ type: 'pong', t: msg.t, serverT: Date.now() });
         break;
       }
-      case 'latencyProbe': {
-        this.adminConn?.send({ 
-          type: 'latencyReply', 
-          round: msg.round, 
-          t: msg.t, 
-          serverT: Date.now() 
-        });
-        break;
-      }
-      case 'latencyReply': {
-        const cb = this.probeCallbacks.get(msg.round);
-        if (cb) cb(msg);
+      case 'pong': {
+        const rtt = Date.now() - msg.t;
+        this.latency = Math.round(rtt / 2);
         break;
       }
     }
@@ -542,25 +361,4 @@ export class ListenerSync {
     this.peer?.destroy();
     this.state = 'disconnected';
   }
-}
-
-// ─── Time Sync Helper ───────────────────────────────────
-
-export function getSyncedTime(cmd: { time: number; serverTime: number }): number {
-  const now = Date.now();
-  const serverNow = cmd.serverTime || now;
-  const networkDelay = Math.max(0, (now - serverNow) / 2000); // one-way delay estimate
-  return Math.max(0, cmd.time + networkDelay);
-}
-
-// ─── Password Check ─────────────────────────────────────
-
-export function verifyAdminPassword(input: string): boolean {
-  return input === ADMIN_PASSWORD;
-}
-
-// ─── Room Discovery (via PeerJS broker introspection) ───
-
-export function getSavedAdminId(): string | null {
-  try { return localStorage.getItem(PEERID_KEY); } catch { return null; }
 }
