@@ -1,7 +1,4 @@
-// ╔══════════════════════════════════════════════════════════════╗
-// ║           SyncWave — Ultra-Precise Sync Engine               ║
-// ║   Target accuracy: ≤20ms using monotonic clock + NTP calib   ║
-// ╚══════════════════════════════════════════════════════════════╝
+// SyncWave v8.0 — Cross-Network NAT Fix + Ultra-Precise Sync
 
 const PEERJS_CDN = 'https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js';
 
@@ -11,33 +8,58 @@ const ICE_SERVERS = [
   { urls: 'stun:stun2.l.google.com:19302' },
   { urls: 'stun:stun3.l.google.com:19302' },
   { urls: 'stun:stun4.l.google.com:19302' },
-  { urls: 'stun:stun.services.mozilla.com' },
-  { urls: 'stun:stun.voiparound.com' },
-  { urls: 'stun:stun.ekiga.net' },
-  { urls: 'stun:stun.ideasip.com' },
-  { urls: 'stun:stun.schlund.de' },
-  { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-  { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+  { urls: 'stun:global.stun.twilio.com:3478' },
+  {
+    urls: 'turn:openrelay.metered.ca:80',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+  {
+    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
+  {
+    urls: 'turn:turn.anyfirewall.com:443?transport=tcp',
+    username: 'webrtc',
+    credential: 'webrtc',
+  },
+  {
+    urls: 'turn:turn01.hubl.in?transport=tcp',
+    username: 'hubl.in',
+    credential: 'hubl.in',
+  },
 ];
 
-function getCfg() {
+function getPeerConfig() {
   return {
-    host: '0.peerjs.com', port: 443, secure: true,
-    config: { iceServers: ICE_SERVERS, iceCandidatePoolSize: 10 },
+    host: '0.peerjs.com',
+    port: 443,
+    secure: true,
+    config: {
+      iceServers: ICE_SERVERS,
+      iceCandidatePoolSize: 10,
+      iceTransportPolicy: 'all',
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require',
+    },
     debug: 2,
   };
 }
 
-/** Monotonic clock — NEVER affected by system time changes */
 export const clock = { now: () => performance.now() };
 
-/** Load PeerJS from CDN */
 function loadPeerJS(): Promise<void> {
   return new Promise((res, rej) => {
     if ((window as any).Peer) { res(); return; }
     const s = document.createElement('script');
-    s.src = PEERJS_CDN; s.crossOrigin = 'anonymous';
+    s.src = PEERJS_CDN;
+    s.crossOrigin = 'anonymous';
     s.onload = () => res();
     s.onerror = () => rej(new Error('PeerJS load failed'));
     document.head.appendChild(s);
@@ -46,14 +68,6 @@ function loadPeerJS(): Promise<void> {
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
-/** Get median from sorted array */
-function median(arr: number[]): number {
-  if (!arr.length) return 0;
-  const s = [...arr].sort((a, b) => a - b);
-  return s[Math.floor(s.length / 2)];
-}
-
-/** Remove outliers using IQR method, keep only precise measurements */
 function filterOutliers(arr: number[]): number[] {
   if (arr.length < 4) return arr;
   const s = [...arr].sort((a, b) => a - b);
@@ -63,133 +77,29 @@ function filterOutliers(arr: number[]): number[] {
   return arr.filter(v => v >= q1 - 1.5 * iqr && v <= q3 + 1.5 * iqr);
 }
 
-/** Safe peer cleanup */
+function median(arr: number[]): number {
+  if (!arr.length) return 0;
+  const s = [...arr].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+}
+
 function safeDestroy(p: any) { try { p?.destroy(); } catch {} }
 
-// ═══════════════════════════════════════════════════════════════
-//  NTP-STYLE CLOCK CALIBRATION
-//  Measures one-way latency from admin → listener
-// ═══════════════════════════════════════════════════════════════
-
-interface CalibResult {
-  offset: number;   // admin_clock - listener_clock  (ms)
-  latency: number;  // one-way latency estimate (ms)
-}
-
-/** Calibrate clock between two peers using 10-round NTP ping/pong */
-async function calibrateClock(conn: any, isAdmin: boolean): Promise<CalibResult> {
-  const samples: number[] = [];
-  const MAX_RTT = 500; // reject samples with RTT > 500ms
-
-  for (let i = 0; i < 10; i++) {
-    if (!conn.open) break;
-    const t0 = clock.now();
-
-    // Send ping
-    conn.send({ t: isAdmin ? 'ping' : 'ping_l', id: i, t0 });
-
-    // Wait for pong
-    const rtt = await new Promise<number>((resolve) => {
-      const handler = (msg: any) => {
-        if ((msg.t === 'pong' || msg.t === 'pong_l') && msg.id === i) {
-          conn.off('data', handler);
-          resolve(clock.now() - t0);
-        }
-      };
-      conn.on('data', handler);
-      setTimeout(() => { conn.off('data', handler); resolve(Infinity); }, 500);
-    });
-
-    if (rtt < MAX_RTT) {
-      samples.push(rtt);
-    }
-    await sleep(20);
-  }
-
-  if (!samples.length) return { offset: 0, latency: 50 };
-
-  const filtered = filterOutliers(samples);
-  const minRtt = Math.min(...filtered);
-  const latency = minRtt / 2; // conservative: assume symmetric
-
-  // For admin side: offset is just latency estimate (positive = admin is ahead)
-  // For listener side: we compute offset in the pong handler
-  const offset = isAdmin ? 0 : 0; // actual offset computed via 2-way
-
-  return { offset, latency };
-}
-
-/** Two-way clock sync: admin sends ping, listener replies with timestamps */
-async function fullClockSync(conn: any): Promise<number> {
-  // Returns: offset such that admin_clock = listener_clock + offset
-  // So listener_clock = admin_clock - offset
-  // To play at admin time T, listener should play at (T - offset)
-
-  const diffs: number[] = [];
-
-  for (let i = 0; i < 12; i++) {
-    if (!conn.open) break;
-    const t0 = clock.now(); // admin local time
-
-    const result = await new Promise<{ t1: number; t2: number } | null>((resolve) => {
-      conn.send({ t: 'sync_req', id: i, t0 });
-
-      const handler = (msg: any) => {
-        if (msg.t === 'sync_resp' && msg.id === i) {
-          conn.off('data', handler);
-          resolve({ t1: msg.t1, t2: msg.t2 });
-        }
-      };
-      conn.on('data', handler);
-      setTimeout(() => { conn.off('data', handler); resolve(null); }, 600);
-    });
-
-    if (result) {
-      const t3 = clock.now(); // admin local time on receive
-      // Using NTP formula:
-      // offset = ((t1 - t0) + (t2 - t3)) / 2
-      // But simplified: we want listener_clock - admin_clock
-      const offset = ((result.t1 - t0) + (result.t2 - t3)) / 2;
-      const rtt = (t3 - t0) - (result.t2 - result.t1);
-      if (rtt < 400) diffs.push(offset);
-    }
-    await sleep(15);
-  }
-
-  if (!diffs.length) return 0;
-
-  const filtered = filterOutliers(diffs);
-  // offset = listener_clock - admin_clock
-  // So to convert admin timestamp to listener time:
-  // listener_time = admin_time + offset
-  return median(filtered);
-}
-
-// ═══════════════════════════════════════════════════════════════
-//  SYNC COMMAND — carries admin timestamp for precise playback
-// ═══════════════════════════════════════════════════════════════
-
-/** Compute target audio position for listener */
 export function computeTargetPosition(
-  cmd: { time: number; ts: number }, // time=audio position (s), ts=admin clock (ms)
-  offset: number // listener_clock - admin_clock (ms)
+  cmd: { time: number; ts: number },
+  offset: number
 ): { position: number; delayMs: number } {
   const nowLocal = clock.now();
-  const cmdArrivalAtListener = cmd.ts + offset; // when cmd was "sent" in listener clock
-  const delayMs = nowLocal - cmdArrivalAtListener; // elapsed since command was issued
-  const position = cmd.time + delayMs / 1000; // advance audio position by elapsed time
+  const cmdSentAtListenerClock = cmd.ts + offset;
+  const delayMs = nowLocal - cmdSentAtListenerClock;
+  const position = cmd.time + delayMs / 1000;
   return { position: Math.max(0, position), delayMs };
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  ADMIN SYNC
-// ═══════════════════════════════════════════════════════════════
-
 interface ListenerEntry {
   conn: any;
-  offset: number;       // listener_clock - admin_clock (ms)
-  latency: number;      // estimated one-way latency (ms)
-  lastPing: number;     // last successful ping time
+  offset: number;
+  latency: number;
 }
 
 export class AdminSync {
@@ -204,7 +114,7 @@ export class AdminSync {
   private PC: any;
   private dead: boolean = false;
   private songs: Map<string, any> = new Map();
-  private heartbeatInterval: any = null;
+  private hbInterval: any = null;
 
   constructor(roomCode: string) {
     this.roomCode = roomCode;
@@ -222,141 +132,127 @@ export class AdminSync {
   private async init(attempt: number = 0) {
     if (this.dead) return;
     console.log('[A] Init', attempt, 'PeerID:', this.adminPeerId);
-
     try {
-      this.peer = new this.PC(this.adminPeerId, getCfg());
-
+      this.peer = new this.PC(this.adminPeerId, getPeerConfig());
       await new Promise<void>((res, rej) => {
         const to = setTimeout(() => rej(new Error('timeout')), 15000);
         this.peer.on('open', () => { clearTimeout(to); res(); });
         this.peer.on('error', (e: any) => { clearTimeout(to); rej(e); });
       });
-
-      console.log('[A] Peer open, waiting for propagation...');
+      console.log('[A] Peer open, propagating...');
       await sleep(3000);
-
       this.state = 'ready';
       this.errorMessage = '';
-      console.log('[A] ✅ Ready:', this.adminPeerId);
+      console.log('[A] Ready:', this.adminPeerId);
       this.cbS?.();
-
-      // Start heartbeat
-      this.heartbeatInterval = setInterval(() => this.heartbeat(), 5000);
-
+      this.hbInterval = setInterval(() => this.heartbeat(), 5000);
       this.peer.on('connection', (c: any) => {
         console.log('[A] Conn from:', c.peer);
         c.on('open', () => this.handleListener(c));
-        c.on('error', (e: any) => console.error('[A] Conn err:', e));
       });
-
-      this.peer.on('disconnected', () => {
-        console.log('[A] Broker disconnect, reconnecting...');
-        this.peer?.reconnect();
-      });
-
+      this.peer.on('disconnected', () => { this.peer?.reconnect(); });
       this.peer.on('error', (e: any) => {
         if (e.type === 'disconnected') { this.peer?.reconnect(); return; }
         console.error('[A] Peer err:', e.type);
       });
-
     } catch (e: any) {
-      console.error('[A] Init failed:', e?.type || e?.message);
+      console.error('[A] Init fail:', e?.type || e?.message);
       if (e?.type === 'unavailable-id' && attempt < 15) {
-        this.errorMessage = `الرمز ${this.roomCode} يتزامن (${attempt + 1}/15)...`;
+        this.errorMessage = `الرمز يتزامن (${attempt + 1}/15)...`;
         this.cbS?.();
         await sleep(4000);
         if (!this.dead) { safeDestroy(this.peer); this.init(attempt + 1); }
       } else {
         this.state = 'error';
-        this.errorMessage = e?.type === 'unavailable-id'
-          ? `الرمز غير متاح. أعد فتح الصفحة.`
-          : 'خطأ: ' + (e?.type || e?.message);
+        this.errorMessage = 'خطأ: ' + (e?.type || e?.message || 'غير معروف');
         this.cbS?.();
       }
     }
   }
 
   private async handleListener(c: any) {
-    const entry: ListenerEntry = { conn: c, offset: 0, latency: 50, lastPing: clock.now() };
+    const entry: ListenerEntry = { conn: c, offset: 0, latency: 50 };
     this.L.set(c.peer, entry);
-
-    // Run clock sync
     try {
-      const offset = await fullClockSync(c);
+      const offset = await this.measureOffset(c);
       entry.offset = offset;
       entry.latency = Math.abs(offset);
-      console.log(`[A] Listener ${c.peer} offset=${offset.toFixed(1)}ms`);
+      console.log(`[A] Listener ${c.peer.slice(0, 6)} offset=${offset.toFixed(1)}ms`);
     } catch (err) {
       console.error('[A] Clock sync failed:', err);
     }
-
-    // Set up ping/pong handler for this listener
     c.on('data', (msg: any) => {
-      if (msg.t === 'sync_req') {
-        // Listener clock sync request: t1 = now (listener time)
-        c.send({ t: 'sync_resp', id: msg.id, t0: msg.t0, t1: clock.now(), t2: clock.now() });
-      } else if (msg.t === 'ping_l') {
+      if (msg.t === 'ping_l') {
         c.send({ t: 'pong_l', id: msg.id, t0: msg.t0, t1: clock.now() });
       } else if (msg.t === 'requestSync') {
         this.sndAll(c);
       }
     });
-
     c.on('close', () => {
-      console.log('[A] Listener closed:', c.peer);
+      console.log('[A] Listener closed:', c.peer.slice(0, 6));
       this.L.delete(c.peer);
       this.cbS?.();
     });
-
     c.on('error', (err: any) => {
-      console.error('[A] Listener err:', c.peer, err);
+      console.error('[A] Listener err:', c.peer.slice(0, 6), err);
       this.L.delete(c.peer);
       this.cbS?.();
     });
-
-    // Send all songs
     this.sndAll(c);
     this.cbN?.(c.peer);
     this.cbS?.();
   }
 
+  private async measureOffset(conn: any): Promise<number> {
+    const offsets: number[] = [];
+    for (let i = 0; i < 15; i++) {
+      if (!conn.open) break;
+      const t0 = clock.now();
+      const pong = await new Promise<{ t0: number; t1: number } | null>((resolve) => {
+        conn.send({ t: 'ping', id: i, t0 });
+        const handler = (msg: any) => {
+          if (msg.t === 'pong' && msg.id === i) {
+            conn.off('data', handler);
+            resolve({ t0: msg.t0, t1: msg.t1 });
+          }
+        };
+        conn.on('data', handler);
+        setTimeout(() => { conn.off('data', handler); resolve(null); }, 500);
+      });
+      if (pong) {
+        const t3 = clock.now();
+        const rtt = t3 - t0;
+        if (rtt < 500) {
+          const estOffset = pong.t1 - t0 - rtt / 2;
+          offsets.push(estOffset);
+        }
+      }
+      await sleep(20);
+    }
+    if (!offsets.length) return 0;
+    const filtered = filterOutliers(offsets);
+    return filtered.length ? median(filtered) : median(offsets);
+  }
+
   private heartbeat() {
     this.L.forEach((e, id) => {
-      if (!e.conn.open) {
-        this.L.delete(id);
-        this.cbS?.();
-        return;
-      }
-      // Ping to keep connection alive
-      try {
-        e.conn.send({ t: 'hb' });
-      } catch {}
+      if (!e.conn.open) { this.L.delete(id); this.cbS?.(); return; }
+      try { e.conn.send({ t: 'hb' }); } catch {}
     });
   }
 
   private async sndAll(c: any) {
     const songs = Array.from(this.songs.values());
-    if (!songs.length) {
-      if (c.open) c.send({ t: 'sd' });
-      return;
-    }
-    for (const s of songs) {
-      if (!c.open) break;
-      await this.sndSong(c, s);
-    }
+    if (!songs.length) { if (c.open) c.send({ t: 'sd' }); return; }
+    for (const s of songs) { if (!c.open) break; await this.sndSong(c, s); }
     if (c.open) c.send({ t: 'sd' });
   }
 
   private async sndSong(c: any, song: any) {
     const SZ = 16000;
     const chunks: string[] = [];
-    for (let i = 0; i < song.fileData.length; i += SZ) {
-      chunks.push(song.fileData.slice(i, i + SZ));
-    }
-    c.send({
-      t: 'sm',
-      meta: { id: song.id, title: song.title, mimeType: song.mimeType, duration: song.duration, size: song.size, tc: chunks.length }
-    });
+    for (let i = 0; i < song.fileData.length; i += SZ) chunks.push(song.fileData.slice(i, i + SZ));
+    c.send({ t: 'sm', meta: { id: song.id, title: song.title, mimeType: song.mimeType, duration: song.duration, size: song.size, tc: chunks.length } });
     await sleep(30);
     for (let i = 0; i < chunks.length; i++) {
       if (!c.open) return;
@@ -373,12 +269,10 @@ export class AdminSync {
     this.L.forEach((e) => { if (e.conn.open) this.sndSong(e.conn, song); });
   }
 
-  /** Send sync command — ts is admin's monotonic clock timestamp */
   sendCommand(action: string, songId: string, time: number) {
     const ts = clock.now();
     this.L.forEach((e) => {
       if (e.conn.open) {
-        // Send offset so listener can compute without round-trip
         e.conn.send({ t: 'cmd', action, songId, time, ts, off: e.offset });
       }
     });
@@ -395,15 +289,11 @@ export class AdminSync {
 
   destroy() {
     this.dead = true;
-    if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
+    if (this.hbInterval) clearInterval(this.hbInterval);
     this.L.forEach((e) => { try { e.conn?.close(); } catch {} });
     safeDestroy(this.peer);
   }
 }
-
-// ═══════════════════════════════════════════════════════════════
-//  LISTENER SYNC
-// ═══════════════════════════════════════════════════════════════
 
 export class ListenerSync {
   private peer: any;
@@ -417,10 +307,9 @@ export class ListenerSync {
   private dead: boolean = false;
   private rx: Map<string, any> = new Map();
   private syncTimer: any = null;
-  private connAlive: boolean = false;
-  private lastDataTime: number = 0;
-  private heartbeatTimer: any = null;
-  private offset: number = 0; // listener_clock - admin_clock (ms)
+  private connOpen: boolean = false;
+  private hbTimer: any = null;
+  private offset: number = 0;
 
   constructor() { this.PC = (window as any).Peer; }
 
@@ -428,12 +317,11 @@ export class ListenerSync {
     this.errorMessage = '';
     this.state = 'connecting';
     this.dead = false;
-    this.connAlive = false;
+    this.connOpen = false;
     this.offset = 0;
     this.rx.clear();
     if (this.syncTimer) clearTimeout(this.syncTimer);
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
-
+    if (this.hbTimer) clearInterval(this.hbTimer);
     try {
       if (!this.PC) {
         await loadPeerJS();
@@ -451,26 +339,21 @@ export class ListenerSync {
     if (this.dead) return;
     const adminPeerId = `sw_${roomCode}`;
     console.log('[L] Init peer, attempt', att + 1);
-
     try {
-      this.peer = new this.PC(undefined, getCfg());
-
+      this.peer = new this.PC(undefined, getPeerConfig());
       await new Promise<void>((res, rej) => {
         const to = setTimeout(() => rej(new Error('timeout')), 15000);
         this.peer.on('open', () => { clearTimeout(to); res(); });
         this.peer.on('error', (e: any) => { if (e.type !== 'disconnected') { clearTimeout(to); rej(e); } });
       });
-
       console.log('[L] Peer open:', this.peer.id);
       await sleep(2000);
       this.dc(adminPeerId, kids, 0);
-
       this.peer.on('disconnected', () => { this.peer?.reconnect(); });
       this.peer.on('error', (e: any) => {
         if (e.type === 'disconnected') { this.peer?.reconnect(); return; }
         console.error('[L] Peer err:', e.type);
       });
-
     } catch (e: any) {
       console.error('[L] Peer init err:', e?.type || e?.message);
       if (att < 3) {
@@ -479,7 +362,7 @@ export class ListenerSync {
         if (!this.dead) this.init(roomCode, kids, att + 1);
       } else {
         this.state = 'error';
-        this.errorMessage = 'تعذر إنشاء الاتصال. تحقق من الإنترنت.';
+        this.errorMessage = 'تعذر إنشاء الاتصال.';
         this.cbState?.();
       }
     }
@@ -488,130 +371,70 @@ export class ListenerSync {
   private dc(aid: string, kids: string[], att: number) {
     if (this.dead) return;
     console.log('[L] Connect to', aid, 'attempt', att + 1);
-
     try {
       this.conn = this.peer.connect(aid, { reliable: true });
     } catch (e) {
       this.retryOrFail(aid, kids, att);
       return;
     }
-
-    let connected = false;
-    const timeout = setTimeout(() => {
-      if (connected || this.dead) return;
+    let opened = false;
+    const to = setTimeout(() => {
+      if (opened || this.dead) return;
       try { this.conn.close(); } catch {}
       this.retryOrFail(aid, kids, att);
     }, 15000);
-
-    this.conn.on('open', async () => {
-      connected = true;
-      clearTimeout(timeout);
-      console.log('[L] ✅ Connected!');
-      this.connAlive = true;
-      this.lastDataTime = clock.now();
+    this.conn.on('open', () => {
+      opened = true;
+      clearTimeout(to);
+      console.log('[L] Connected!');
+      this.connOpen = true;
       this.state = 'syncing';
       this.cbState?.();
-
-      // Start heartbeat check
-      this.heartbeatTimer = setInterval(() => this.checkAlive(), 8000);
-
-      // Request sync
+      this.hbTimer = setInterval(() => this.checkAlive(), 10000);
       try { this.conn.send({ t: 'requestSync', kids }); } catch (e) {}
-
-      // Force-ready after timeout (no songs case)
       this.syncTimer = setTimeout(() => {
         if (this.state === 'syncing' && !this.dead) {
-          console.log('[L] Force ready (no songs)');
           this.state = 'ready';
           this.cbState?.();
         }
       }, 8000);
-
-      // Run clock sync
-      try {
-        this.offset = await this.runClockSync();
-        console.log(`[L] Clock offset: ${this.offset.toFixed(1)}ms`);
-      } catch (err) {
-        console.error('[L] Clock sync error:', err);
-      }
     });
-
     this.conn.on('data', (msg: any) => {
-      this.lastDataTime = clock.now();
-      this.connAlive = true;
+      if (msg.t === 'hb') {
+        try { this.conn.send({ t: 'hb_ack' }); } catch {}
+        return;
+      }
+      if (msg.t === 'ping') {
+        this.conn.send({ t: 'pong', id: msg.id, t0: msg.t0, t1: clock.now() });
+        return;
+      }
       this.onData(msg);
     });
-
     this.conn.on('close', () => {
-      clearTimeout(timeout);
+      clearTimeout(to);
       if (this.syncTimer) clearTimeout(this.syncTimer);
-      if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+      if (this.hbTimer) clearInterval(this.hbTimer);
       console.log('[L] Conn closed');
       if (!this.dead && this.state !== 'error') {
-        this.connAlive = false;
+        this.connOpen = false;
         this.state = 'disconnected';
         this.cbState?.();
       }
     });
-
     this.conn.on('error', (e: any) => {
-      clearTimeout(timeout);
+      clearTimeout(to);
       console.error('[L] Conn error:', e);
-      if (!connected) this.retryOrFail(aid, kids, att);
+      if (!opened) this.retryOrFail(aid, kids, att);
     });
   }
 
-  /** Check if connection is actually alive using data activity */
   private checkAlive() {
-    const elapsed = clock.now() - this.lastDataTime;
-    if (elapsed > 20000 && this.connAlive) {
-      console.log('[L] No data for 20s, marking potentially stale');
-      // Don't change state yet, just try sending a ping
-      try {
-        this.conn.send({ t: 'ping_l', id: -1, t0: clock.now() });
-      } catch {
-        this.connAlive = false;
-        this.state = 'disconnected';
-        this.cbState?.();
-      }
+    if (!this.conn?.open && this.connOpen) {
+      console.log('[L] Connection lost');
+      this.connOpen = false;
+      this.state = 'disconnected';
+      this.cbState?.();
     }
-  }
-
-  /** Run clock sync from listener side */
-  private async runClockSync(): Promise<number> {
-    // offset = listener_clock - admin_clock
-    const diffs: number[] = [];
-
-    for (let i = 0; i < 12; i++) {
-      if (!this.conn?.open) break;
-
-      const result = await new Promise<{ t0: number; t3: number } | null>((resolve) => {
-        const handler = (msg: any) => {
-          if (msg.t === 'sync_resp' && msg.id === i) {
-            this.conn.off('data', handler);
-            resolve({ t0: msg.t0, t3: msg.t2 });
-          }
-        };
-        this.conn.on('data', handler);
-        setTimeout(() => { this.conn.off('data', handler); resolve(null); }, 600);
-      });
-
-      if (result) {
-        // offset = ((t1 - t0) + (t2 - t3)) / 2
-        // But we received t0 and t3 (both admin times), and t1==t2 (admin time at bounce)
-        // Simplified: offset_approx = (received_admin_midpoint) - our_send_time
-        const rtt = clock.now() - clock.now(); // we need local timing
-        // Actually we can't compute offset without local receive timestamp
-        // Let's use a simpler approach: measure RTT and assume symmetric
-      }
-      await sleep(15);
-    }
-
-    // Simpler approach: use the sync_resp to estimate
-    // offset = listener_clock - admin_clock
-    // We can't measure it precisely from listener alone without local timestamps
-    // The admin measures offset and sends it in cmd.off
-    return 0; // Will use admin-provided offset from cmd.off
   }
 
   private retryOrFail(aid: string, kids: string[], att: number) {
@@ -622,7 +445,7 @@ export class ListenerSync {
     } else {
       safeDestroy(this.peer);
       this.state = 'error';
-      this.errorMessage = 'تعذر الاتصال بالمسؤول. تأكد من صحة الرمز.';
+      this.errorMessage = 'تعذر الاتصال بالمسؤول. تأكد من الرمز.';
       this.cbState?.();
     }
   }
@@ -658,22 +481,12 @@ export class ListenerSync {
         break;
       }
       case 'cmd': {
-        // Use admin-provided offset for precise sync
         if (msg.off !== undefined) this.offset = msg.off;
         this.cbCmd?.({ ...msg, _listenerOffset: this.offset });
         break;
       }
-      case 'hb': {
-        // Heartbeat from admin — respond to keep connection alive
-        try { this.conn.send({ t: 'hb_ack' }); } catch {}
-        break;
-      }
-      case 'sync_resp': {
-        // Handled in runClockSync
-        break;
-      }
       default:
-        // Ignore unknown messages silently
+        break;
     }
   }
 
@@ -684,7 +497,7 @@ export class ListenerSync {
   disconnect() {
     this.dead = true;
     if (this.syncTimer) clearTimeout(this.syncTimer);
-    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    if (this.hbTimer) clearInterval(this.hbTimer);
     try { this.conn?.close(); } catch {}
     safeDestroy(this.peer);
     this.state = 'disconnected';
