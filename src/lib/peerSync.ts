@@ -62,7 +62,7 @@ export class AdminSync {
     try { const r = await this.calib(c); e.off = r; console.log('[A] Clock:', r); } catch {}
     c.on('close', () => { this.L.delete(c.peer); this.cbS?.(); });
     c.on('error', () => { this.L.delete(c.peer); this.cbS?.(); });
-    c.on('data', (msg: any) => { if (msg.type === 'requestSync') this.sndAll(c); });
+    c.on('data', (msg: any) => { if (msg.t === 'requestSync') this.sndAll(c); });
     console.log('[A] Sending', this.songs.size, 'songs');
     this.sndAll(c);
     this.cbN?.(c.peer); this.cbS?.();

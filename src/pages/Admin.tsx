@@ -132,7 +132,6 @@ export default function Admin() {
 
   // Init sync
   useEffect(() => {
-    if (!auth) return;
     const sync = new AdminSync();
     syncRef.current = sync;
 
@@ -143,12 +142,17 @@ export default function Admin() {
 
     sync.onNewListener((info) => {
       setListenerCount(sync.getListenerCount());
-      getAllSongs().then(all => all.forEach(s => sync.addSong(s)));
+    });
+
+    // Register ALL existing songs so new listeners get them
+    getAllSongs().then(all => {
+      console.log('[Admin] Registering', all.length, 'existing songs');
+      all.forEach(s => sync.addSong(s));
     });
 
     const iv = setInterval(() => setListenerCount(sync.getListenerCount()), 1000);
     return () => { clearInterval(iv); sync.destroy(); };
-  }, [auth]);
+  }, []);
 
   // Audio
   useEffect(() => {
