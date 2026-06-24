@@ -48,6 +48,15 @@ module.exports = {
           border: "hsl(var(--sidebar-border))",
           ring: "hsl(var(--sidebar-ring))",
         },
+        'neon-cyan': '#00F0FF',
+        'neon-pink': '#FF00FF',
+        'neon-green': '#00FF66',
+        'surface': '#111111',
+        'surface-hover': '#1A1A1A',
+      },
+      fontFamily: {
+        tajawal: ['Tajawal', 'sans-serif'],
+        fira: ['Fira Code', 'monospace'],
       },
       borderRadius: {
         xl: "calc(var(--radius) + 4px)",
