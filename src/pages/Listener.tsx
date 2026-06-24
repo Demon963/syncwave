@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ListenerSync, getSyncedTime } from '@/lib/peerSync';
+import { ListenerSync, computeTargetPosition } from '@/lib/peerSync';
 import {
   Headphones, ArrowLeft, Volume2, Volume1, VolumeX,
   Loader2, Wifi, Music, Radio, Activity, LogIn
@@ -281,25 +281,33 @@ export default function Listener() {
   const executeCmd = useCallback((cmd: any) => {
     const a = audioRef.current;
     if (!a) return;
-    const targetTime = getSyncedTime(cmd);
+
+    // Use admin-provided offset for precise sync
+    // offset = listener_clock - admin_clock
+    // position = cmd.time + (listener_now - (cmd.ts + offset)) / 1000
+    const offset = cmd._listenerOffset || 0;
+    const { position, delayMs } = computeTargetPosition(cmd, offset);
+
+    console.log(`[Sync] action=${cmd.action} pos=${position.toFixed(3)}s delay=${delayMs.toFixed(1)}ms offset=${offset.toFixed(1)}ms`);
 
     switch (cmd.action) {
       case 'play': {
         dbGetSong(cmd.songId).then(song => {
           if (!song) { pendingCmdRef.current = cmd; setTrackName('جاري تحميل الأغنية...'); return; }
           if (currentSong?.id !== song.id) { a.src = base64ToBlobUrl(song.fileData, song.mimeType); setCurrentSong(song); setTrackName(song.title); }
-          if (Math.abs(a.currentTime - targetTime) > 0.1) a.currentTime = targetTime;
+          // Only seek if drift > 50ms to avoid jitter
+          if (Math.abs(a.currentTime - position) > 0.05) a.currentTime = position;
           a.play().then(() => setIsPlaying(true)).catch(() => {});
         });
         break;
       }
       case 'pause': { a.pause(); setIsPlaying(false); break; }
-      case 'seek': { a.currentTime = targetTime; break; }
+      case 'seek': { a.currentTime = position; break; }
       case 'track': {
         dbGetSong(cmd.songId).then(song => {
           if (!song) { pendingCmdRef.current = cmd; setTrackName('جاري تحميل الأغنية...'); return; }
           a.src = base64ToBlobUrl(song.fileData, song.mimeType); setCurrentSong(song); setTrackName(song.title);
-          a.currentTime = targetTime; a.play().then(() => setIsPlaying(true)).catch(() => {});
+          a.currentTime = position; a.play().then(() => setIsPlaying(true)).catch(() => {});
         });
         break;
       }
