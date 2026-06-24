@@ -1,12 +1,12 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ListenerSync, getSyncedTime } from '@/lib/peerSync';
+import { ListenerSync, getSyncedTime, getSavedAdminId } from '@/lib/peerSync';
+import type { SyncCmd } from '@/lib/peerSync';
 import {
   Headphones, Radio, Unlink, ArrowLeft, Volume2, Volume1, VolumeX,
-  Loader2, Wifi, WifiOff, Music
+  Loader2, Wifi, WifiOff, Music, RefreshCw, Zap, Clock
 } from 'lucide-react';
-import type { SyncCmd } from '@/lib/peerSync';
 
 // ─── Types ──────────────────────────────────────────────
 
@@ -19,6 +19,12 @@ interface Song {
   size: number;
   createdAt: number;
   createdBy: string;
+}
+
+interface RoomInfo {
+  peerId: string;
+  label: string;
+  lastSeen: number;
 }
 
 // ─── IndexedDB Cache ────────────────────────────────────
@@ -84,7 +90,30 @@ function formatDuration(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-// ─── Component: Listener ────────────────────────────────
+// ─── Room Discovery ─────────────────────────────────────
+
+const ROOMS_KEY = 'syncwave_known_rooms';
+
+function loadKnownRooms(): RoomInfo[] {
+  try {
+    const data = localStorage.getItem(ROOMS_KEY);
+    if (!data) return [];
+    const rooms = JSON.parse(data) as RoomInfo[];
+    // Filter rooms seen in last 24 hours
+    const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+    return rooms.filter(r => r.lastSeen > cutoff);
+  } catch { return []; }
+}
+
+function saveRoom(peerId: string) {
+  try {
+    const rooms = loadKnownRooms().filter(r => r.peerId !== peerId);
+    rooms.unshift({ peerId, label: `غرفة ${peerId.slice(-6)}`, lastSeen: Date.now() });
+    localStorage.setItem(ROOMS_KEY, JSON.stringify(rooms.slice(0, 20)));
+  } catch {}
+}
+
+// ─── Main Listener Component ────────────────────────────
 
 export default function Listener() {
   const navigate = useNavigate();
@@ -93,11 +122,15 @@ export default function Listener() {
   const syncRef = useRef<ListenerSync | null>(null);
   const receivedSongsRef = useRef<Set<string>>(new Set());
   const pendingCmdRef = useRef<SyncCmd | null>(null);
+  const timeOffsetRef = useRef<number>(0);
 
   const [adminId, setAdminId] = useState(searchParams.get('room') || '');
   const [status, setStatus] = useState<'idle' | 'connecting' | 'syncing' | 'ready' | 'disconnected' | 'error'>('idle');
   const [isPlaying, setIsPlaying] = useState(false);
-  const [volume, setVolume] = useState(0.8);
+  const [volume, setVolume] = useState(() => {
+    const saved = localStorage.getItem('syncwave_listener_volume');
+    return saved ? parseFloat(saved) : 0.8;
+  });
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -105,10 +138,16 @@ export default function Listener() {
   const [trackName, setTrackName] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [songCount, setSongCount] = useState(0);
-  const [syncProgress, setSyncProgress] = useState({ current: 0, total: 0 });
   const [latency, setLatency] = useState(0);
+  const [knownRooms, setKnownRooms] = useState<RoomInfo[]>([]);
+  const [showRooms, setShowRooms] = useState(false);
 
-  // ── Load initial song count ──
+  // Load known rooms
+  useEffect(() => {
+    setKnownRooms(loadKnownRooms());
+  }, []);
+
+  // Load initial songs
   useEffect(() => {
     dbGetAllSongs().then(songs => {
       setSongCount(songs.length);
@@ -116,7 +155,7 @@ export default function Listener() {
     });
   }, []);
 
-  // ── Audio progress ──
+  // Audio progress
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -135,17 +174,23 @@ export default function Listener() {
   }, [currentSong]);
 
   useEffect(() => { if (audioRef.current) audioRef.current.volume = volume; }, [volume]);
+  useEffect(() => { localStorage.setItem('syncwave_listener_volume', volume.toString()); }, [volume]);
 
-  // ── Execute command ──
+  // Execute command with precise sync
   const executeCommand = useCallback((cmd: SyncCmd) => {
     const audio = audioRef.current;
     if (!audio) return;
+
+    // Calculate precise synced time using server timestamp
+    const now = Date.now();
+    const serverNow = cmd.serverTime || cmd.timestamp;
+    const oneWayDelay = Math.max(0, (now - serverNow) / 2000);
+    const targetTime = Math.max(0, cmd.time + oneWayDelay);
 
     switch (cmd.action) {
       case 'play': {
         dbGetSong(cmd.songId).then(song => {
           if (!song) {
-            // Song not cached — queue and wait
             pendingCmdRef.current = cmd;
             setTrackName('جاري تحميل الأغنية...');
             return;
@@ -155,10 +200,8 @@ export default function Listener() {
             setCurrentSong(song);
             setTrackName(song.title);
           }
-          // Sync position using server timestamp
-          const syncedTime = getSyncedTime(cmd);
-          if (Math.abs(audio.currentTime - syncedTime) > 0.3) {
-            audio.currentTime = syncedTime;
+          if (Math.abs(audio.currentTime - targetTime) > 0.1) {
+            audio.currentTime = targetTime;
           }
           audio.play().then(() => setIsPlaying(true)).catch(() => {});
         });
@@ -170,7 +213,7 @@ export default function Listener() {
         break;
       }
       case 'seek': {
-        audio.currentTime = Math.max(0, cmd.time);
+        audio.currentTime = targetTime;
         break;
       }
       case 'track': {
@@ -183,8 +226,7 @@ export default function Listener() {
           audio.src = base64ToBlobUrl(song.fileData, song.mimeType);
           setCurrentSong(song);
           setTrackName(song.title);
-          const syncedTime = getSyncedTime(cmd);
-          audio.currentTime = syncedTime;
+          audio.currentTime = targetTime;
           audio.play().then(() => setIsPlaying(true)).catch(() => {});
         });
         break;
@@ -192,15 +234,13 @@ export default function Listener() {
     }
   }, [currentSong]);
 
-  // ── Handle song received (sync) ──
+  // Handle song received
   const handleSongReceived = useCallback(async (song: Song) => {
     if (!receivedSongsRef.current.has(song.id)) {
       await dbSaveSong(song);
       receivedSongsRef.current.add(song.id);
       setSongCount(prev => prev + 1);
-      setSyncProgress(prev => ({ current: prev.current + 1, total: prev.total }));
 
-      // Check if there's a pending command waiting for this song
       if (pendingCmdRef.current?.songId === song.id) {
         executeCommand(pendingCmdRef.current);
         pendingCmdRef.current = null;
@@ -208,19 +248,25 @@ export default function Listener() {
     }
   }, [executeCommand]);
 
-  // ── Connect to admin ──
-  const connect = useCallback(() => {
-    const targetId = adminId.trim();
-    if (!targetId) { setErrorMsg('أدخل معرف البث'); return; }
+  // Connect to admin
+  const connect = useCallback((targetId?: string) => {
+    const roomId = targetId || adminId.trim();
+    if (!roomId) { setErrorMsg('أدخل معرف البث'); return; }
 
+    setAdminId(roomId);
     setStatus('connecting');
     setErrorMsg('');
+    saveRoom(roomId);
 
     const sync = new ListenerSync();
     syncRef.current = sync;
 
     sync.onStateChange(() => {
-      setStatus(sync.state as any);
+      const s = sync.state as any;
+      setStatus(s);
+      if (s === 'ready' || s === 'syncing') {
+        setLatency(sync.latency);
+      }
     });
 
     sync.onSong(async (song) => {
@@ -231,21 +277,21 @@ export default function Listener() {
       executeCommand(cmd);
     });
 
-    // Get known song IDs for incremental sync
     dbGetAllSongs().then(songs => {
       const knownIds = songs.map(s => s.id);
-      sync.connect(targetId, knownIds);
+      sync.connect(roomId, knownIds);
     });
   }, [adminId, executeCommand, handleSongReceived]);
 
   // Auto-connect from URL
   useEffect(() => {
-    if (searchParams.get('room')) {
-      const timer = setTimeout(connect, 500);
+    const room = searchParams.get('room');
+    if (room) {
+      setAdminId(room);
+      const timer = setTimeout(() => connect(room), 500);
       return () => clearTimeout(timer);
     }
-    // eslint-disable-next-line
-  }, []);
+  }, []); // eslint-disable-line
 
   // Cleanup
   useEffect(() => {
@@ -267,6 +313,28 @@ export default function Listener() {
     return <Volume2 className="w-4 h-4" />;
   };
 
+  const refreshRooms = () => {
+    setKnownRooms(loadKnownRooms());
+  };
+
+  const statusColors = {
+    idle: '#555555',
+    connecting: '#FFAA00',
+    syncing: '#FFAA00',
+    ready: '#00FF66',
+    disconnected: '#FF3366',
+    error: '#FF3366',
+  };
+
+  const statusLabels: Record<string, string> = {
+    idle: 'غير متصل',
+    connecting: 'جاري الاتصال...',
+    syncing: 'جاري التحميل...',
+    ready: 'متزامن',
+    disconnected: 'انقطع',
+    error: 'خطأ',
+  };
+
   return (
     <div className="min-h-[100dvh] bg-[#0A0A0A] text-white font-['Tajawal'] flex flex-col" dir="rtl">
       <audio ref={audioRef} crossOrigin="anonymous" playsInline />
@@ -282,16 +350,8 @@ export default function Listener() {
             <span className="font-bold text-sm">مساحة المستمع</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <div className={`w-2 h-2 rounded-full ${
-              status === 'ready' ? 'bg-[#00FF66]' :
-              status === 'connecting' || status === 'syncing' ? 'bg-[#FFAA00] animate-pulse' :
-              status === 'error' || status === 'disconnected' ? 'bg-[#FF3366]' : 'bg-[#555555]'
-            }`} />
-            <span className="text-[10px] text-[#A0A0A0]">
-              {status === 'ready' ? 'متزامن' : status === 'connecting' ? 'جاري الاتصال...' :
-               status === 'syncing' ? 'جاري التحميل...' : status === 'error' ? 'خطأ' :
-               status === 'disconnected' ? 'انقطع' : 'غير متصل'}
-            </span>
+            <div className={`w-2 h-2 rounded-full ${status === 'ready' ? 'bg-[#00FF66]' : status === 'connecting' || status === 'syncing' ? 'bg-[#FFAA00] animate-pulse' : status === 'error' || status === 'disconnected' ? 'bg-[#FF3366]' : 'bg-[#555555]'}`} />
+            <span className="text-[10px] text-[#A0A0A0]">{statusLabels[status] || 'غير متصل'}</span>
           </div>
         </div>
       </div>
@@ -306,7 +366,7 @@ export default function Listener() {
           <div className="flex items-center justify-center gap-[3px] h-20 w-40 relative z-10">
             {[...Array(16)].map((_, i) => (
               <motion.div key={i} className="w-1.5 rounded-full"
-                style={{ background: status === 'ready' ? '#FF00FF' : status === 'connecting' || status === 'syncing' ? '#FFAA00' : '#333333' }}
+                style={{ background: statusColors[status] || '#555555' }}
                 animate={status === 'ready' && isPlaying
                   ? { height: [10, 15 + Math.sin(i * 0.7) * 30, 10], opacity: [0.5, 1, 0.5] }
                   : status === 'syncing'
@@ -317,8 +377,8 @@ export default function Listener() {
           </div>
         </div>
 
-        {/* Connection Form */}
         <AnimatePresence mode="wait">
+          {/* ── Connection Form ── */}
           {(status === 'idle' || status === 'error' || status === 'disconnected') && (
             <motion.div key="connect" initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -20 }} className="w-full max-w-sm">
               <div className="text-center mb-6">
@@ -326,20 +386,57 @@ export default function Listener() {
                 <h2 className="text-lg font-bold mb-1">ادخل معرف البث</h2>
                 <p className="text-[#A0A0A0] text-xs">من المسؤول</p>
               </div>
+              
               <div className="space-y-3">
-                <input type="text" value={adminId} onChange={e => setAdminId(e.target.value)} placeholder="مثال: abc123..."
+                <input type="text" value={adminId} onChange={e => setAdminId(e.target.value)} placeholder="مثال: sw_abc123..."
                   className="w-full bg-[#111111] border border-[#222222] rounded-xl px-4 py-3.5 text-base text-center text-white placeholder-[#555555] focus:border-[#FF00FF] focus:outline-none font-mono"
                   onKeyDown={e => e.key === 'Enter' && connect()} />
                 {errorMsg && <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-[#FF3366] text-xs text-center">{errorMsg}</motion.p>}
-                <button onClick={connect} disabled={!adminId.trim()}
+                <button onClick={() => connect()} disabled={!adminId.trim()}
                   className="w-full bg-[#FF00FF] hover:bg-[#FF00FF]/80 disabled:opacity-40 disabled:cursor-not-allowed text-[#0A0A0A] font-bold py-3.5 rounded-xl active:scale-[0.98] transition-all">
                   اتصال بالبث
                 </button>
               </div>
+
+              {/* Known Rooms */}
+              {knownRooms.length > 0 && (
+                <div className="mt-6">
+                  <button onClick={() => setShowRooms(!showRooms)} className="flex items-center gap-2 mx-auto text-[#A0A0A0] text-xs hover:text-white transition-colors mb-3">
+                    <Zap className="w-3 h-3" />
+                    {showRooms ? 'إخفاء' : 'عرض'} الغرف المفتوحة ({knownRooms.length})
+                    <RefreshCw className="w-3 h-3" onClick={(e) => { e.stopPropagation(); refreshRooms(); }} />
+                  </button>
+                  
+                  <AnimatePresence>
+                    {showRooms && (
+                      <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
+                        <div className="space-y-2">
+                          {knownRooms.map((room) => (
+                            <button key={room.peerId} onClick={() => connect(room.peerId)}
+                              className="w-full bg-[#111111] border border-[#222222] rounded-xl p-3 flex items-center gap-3 hover:border-[#FF00FF]/50 transition-all text-right">
+                              <div className="w-8 h-8 rounded-lg bg-[#FF00FF]/10 flex items-center justify-center flex-shrink-0">
+                                <Wifi className="w-4 h-4 text-[#FF00FF]" />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium truncate">{room.label}</p>
+                                <p className="text-[10px] text-[#555555] font-mono">{room.peerId}</p>
+                              </div>
+                              <div className="flex items-center gap-1 text-[#555555]">
+                                <Clock className="w-3 h-3" />
+                                <span className="text-[10px]">{Math.round((Date.now() - room.lastSeen) / 60000)}د</span>
+                              </div>
+                            </button>
+                          ))}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              )}
             </motion.div>
           )}
 
-          {/* Syncing */}
+          {/* ── Syncing ── */}
           {status === 'syncing' && (
             <motion.div key="syncing" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-center">
               <motion.div className="w-10 h-10 border-2 border-[#FFAA00] border-t-transparent rounded-full mx-auto mb-3" animate={{ rotate: 360 }} transition={{ duration: 1, repeat: Infinity, ease: 'linear' }} />
@@ -348,7 +445,7 @@ export default function Listener() {
             </motion.div>
           )}
 
-          {/* Connecting */}
+          {/* ── Connecting ── */}
           {status === 'connecting' && (
             <motion.div key="connecting" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-center">
               <Loader2 className="w-10 h-10 text-[#FF00FF] animate-spin mx-auto mb-3" />
@@ -356,7 +453,7 @@ export default function Listener() {
             </motion.div>
           )}
 
-          {/* Ready / Playing */}
+          {/* ── Ready ── */}
           {status === 'ready' && (
             <motion.div key="ready" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="w-full max-w-sm text-center">
               <div className="mb-6">
@@ -369,7 +466,11 @@ export default function Listener() {
                     <Wifi className="w-3.5 h-3.5" /> متصل
                   </span>
                   <span className="text-[#A0A0A0] text-xs">{songCount} أغنية</span>
-                  {latency > 0 && <span className="text-[#A0A0A0] text-xs font-mono">{latency}ms</span>}
+                  {latency > 0 && (
+                    <span className="text-[#A0A0A0] text-xs font-mono bg-[#222222] px-1.5 py-0.5 rounded">
+                      {latency}ms
+                    </span>
+                  )}
                 </div>
                 {!currentSong && (
                   <p className="text-[#A0A0A0] text-xs mt-3 max-w-[250px] mx-auto">
@@ -391,7 +492,7 @@ export default function Listener() {
                 </div>
               )}
 
-              {/* Volume (ONLY listener control) */}
+              {/* Volume only */}
               <div className="flex items-center gap-3 justify-center mb-6 max-w-[200px] mx-auto">
                 <span className="text-[#A0A0A0]">{getVolumeIcon()}</span>
                 <input type="range" min={0} max={1} step={0.01} value={volume}

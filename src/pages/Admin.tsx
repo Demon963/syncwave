@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router';
 import { motion, AnimatePresence } from 'framer-motion';
-import { AdminSync } from '@/lib/peerSync';
+import { AdminSync, verifyAdminPassword } from '@/lib/peerSync';
 import {
   Play, Pause, SkipBack, SkipForward, Upload, Copy, Check, Volume2,
-  Radio, Users, ArrowLeft, Music, Trash2, Wifi, Loader2, Headphones, VolumeX
+  Radio, Users, ArrowLeft, Music, Trash2, Wifi, Loader2, VolumeX, Lock
 } from 'lucide-react';
 
 // ─── Types ──────────────────────────────────────────────
@@ -18,46 +18,6 @@ interface Song {
   size: number;
   createdAt: number;
   createdBy: string;
-}
-
-// ─── Helpers ────────────────────────────────────────────
-
-function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve((reader.result as string).split(',')[1]);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
-function base64ToBlobUrl(base64: string, mimeType: string): string {
-  const byteChars = atob(base64);
-  const byteNums = new Uint8Array(byteChars.length);
-  for (let i = 0; i < byteChars.length; i++) byteNums[i] = byteChars.charCodeAt(i);
-  return URL.createObjectURL(new Blob([byteNums], { type: mimeType }));
-}
-
-function formatDuration(seconds: number): string {
-  if (!seconds || isNaN(seconds)) return '0:00';
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
-}
-
-function formatFileSize(bytes: number): string {
-  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
-}
-
-function generateSongId(base64Data: string): string {
-  let hash = 0;
-  const str = base64Data.slice(0, 1024);
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash |= 0;
-  }
-  return 'song_' + Math.abs(hash).toString(36) + '_' + Date.now().toString(36);
 }
 
 // ─── IndexedDB Helpers ──────────────────────────────────
@@ -109,7 +69,117 @@ async function dbDeleteSong(id: string): Promise<void> {
   });
 }
 
-// ─── Component: Admin ───────────────────────────────────
+// ─── Helpers ────────────────────────────────────────────
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve((reader.result as string).split(',')[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function base64ToBlobUrl(base64: string, mimeType: string): string {
+  const byteChars = atob(base64);
+  const byteNums = new Uint8Array(byteChars.length);
+  for (let i = 0; i < byteChars.length; i++) byteNums[i] = byteChars.charCodeAt(i);
+  return URL.createObjectURL(new Blob([byteNums], { type: mimeType }));
+}
+
+function formatDuration(seconds: number): string {
+  if (!seconds || isNaN(seconds)) return '0:00';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
+function formatFileSize(bytes: number): string {
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+function generateSongId(base64Data: string): string {
+  let hash = 0;
+  const str = base64Data.slice(0, 1024);
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash |= 0;
+  }
+  return 'song_' + Math.abs(hash).toString(36) + '_' + Date.now().toString(36);
+}
+
+function getAudioDuration(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    const audio = document.createElement('audio');
+    audio.preload = 'metadata';
+    audio.onloadedmetadata = () => resolve(audio.duration || 0);
+    audio.onerror = () => resolve(0);
+    audio.src = URL.createObjectURL(file);
+  });
+}
+
+// ─── Password Gate ──────────────────────────────────────
+
+function PasswordGate({ onUnlock }: { onUnlock: () => void }) {
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState(false);
+
+  const handleSubmit = () => {
+    if (verifyAdminPassword(password)) {
+      onUnlock();
+      localStorage.setItem('syncwave_admin_auth', 'true');
+    } else {
+      setError(true);
+      setTimeout(() => setError(false), 2000);
+    }
+  };
+
+  return (
+    <div className="min-h-[100dvh] bg-[#0A0A0A] text-white font-['Tajawal'] flex items-center justify-center" dir="rtl">
+      <motion.div 
+        initial={{ opacity: 0, scale: 0.95 }}
+        animate={{ opacity: 1, scale: 1 }}
+        className="w-full max-w-sm px-6"
+      >
+        <div className="text-center mb-8">
+          <div className="w-16 h-16 rounded-2xl bg-[#FF00FF]/10 flex items-center justify-center mx-auto mb-4">
+            <Lock className="w-8 h-8 text-[#FF00FF]" />
+          </div>
+          <h1 className="text-2xl font-bold mb-2">مساحة المسؤول</h1>
+          <p className="text-[#A0A0A0] text-sm">أدخل كلمة المرور للدخول</p>
+        </div>
+        
+        <div className="space-y-3">
+          <input
+            type="password"
+            value={password}
+            onChange={e => { setPassword(e.target.value); setError(false); }}
+            placeholder="كلمة المرور"
+            className={`w-full bg-[#111111] border rounded-xl px-4 py-3.5 text-center text-white placeholder-[#555555] focus:outline-none font-mono text-lg ${
+              error ? 'border-[#FF3366]' : 'border-[#222222] focus:border-[#FF00FF]'
+            }`}
+            onKeyDown={e => e.key === 'Enter' && handleSubmit()}
+            autoFocus
+          />
+          {error && (
+            <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-[#FF3366] text-xs text-center">
+              كلمة المرور غير صحيحة
+            </motion.p>
+          )}
+          <button
+            onClick={handleSubmit}
+            className="w-full bg-[#FF00FF] hover:bg-[#FF00FF]/80 text-[#0A0A0A] font-bold py-3.5 rounded-xl active:scale-[0.98] transition-all"
+          >
+            دخول
+          </button>
+        </div>
+      </motion.div>
+    </div>
+  );
+}
+
+// ─── Main Admin Component ───────────────────────────────
 
 export default function Admin() {
   const navigate = useNavigate();
@@ -117,23 +187,33 @@ export default function Admin() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const syncRef = useRef<AdminSync | null>(null);
 
+  // Auth state
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    return localStorage.getItem('syncwave_admin_auth') === 'true';
+  });
+
+  // Core state
   const [songs, setSongs] = useState<Song[]>([]);
   const [currentSong, setCurrentSong] = useState<Song | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [volume, setVolume] = useState(0.8);
+  const [volume, setVolume] = useState(() => {
+    const saved = localStorage.getItem('syncwave_volume');
+    return saved ? parseFloat(saved) : 0.8;
+  });
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [copied, setCopied] = useState(false);
   const [listenerCount, setListenerCount] = useState(0);
+  const [listenerIds, setListenerIds] = useState<string[]>([]);
   const [syncState, setSyncState] = useState<'init' | 'ready' | 'error'>('init');
   const [uploading, setUploading] = useState(false);
-  const [syncingListeners, setSyncingListeners] = useState<Set<string>>(new Set());
   const [uploadProgress, setUploadProgress] = useState<{ current: number; total: number } | null>(null);
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
   const [isMuted, setIsMuted] = useState(false);
+  const [peerIdReady, setPeerIdReady] = useState(false);
 
-  // ── Load songs from IndexedDB ──
+  // ── Load songs ──
   useEffect(() => {
     loadSongs();
   }, []);
@@ -143,42 +223,50 @@ export default function Admin() {
     setSongs(list);
   };
 
-  // ── Init AdminSync (PeerJS) ──
+  // ── Init AdminSync ──
   useEffect(() => {
+    if (!isAuthenticated) return;
+    
     const sync = new AdminSync();
     syncRef.current = sync;
 
     sync.onStateChange(() => {
       setSyncState(sync.state === 'ready' ? 'ready' : 'error');
       setListenerCount(sync.getListenerCount());
+      setListenerIds(sync.getListenerIds());
+      if (sync.peerId) setPeerIdReady(true);
     });
 
     sync.onNewListener((info) => {
-      setSyncingListeners(prev => new Set(prev).add(info.id));
       setListenerCount(sync.getListenerCount());
+      setListenerIds(sync.getListenerIds());
       // Auto-sync songs to new listener
       dbGetAllSongs().then(allSongs => {
         sync.sendSongs(info.id, allSongs);
-        setTimeout(() => {
-          setSyncingListeners(prev => {
-            const next = new Set(prev);
-            next.delete(info.id);
-            return next;
-          });
-        }, 2000);
       });
     });
 
-    return () => sync.destroy();
-  }, []);
+    sync.onSongRequest(() => {
+      // Send all songs to requesting listener
+      dbGetAllSongs().then(allSongs => {
+        sync.getListenerIds().forEach(id => {
+          sync.sendSongs(id, allSongs);
+        });
+      });
+    });
 
-  // Poll listener count
-  useEffect(() => {
-    const iv = setInterval(() => {
-      setListenerCount(syncRef.current?.getListenerCount() ?? 0);
+    // Persist stats
+    const statsInterval = setInterval(() => {
+      setListenerCount(sync.getListenerCount());
+      setListenerIds(sync.getListenerIds());
+      if (sync.peerId) setPeerIdReady(true);
     }, 1000);
-    return () => clearInterval(iv);
-  }, []);
+
+    return () => {
+      clearInterval(statsInterval);
+      sync.destroy();
+    };
+  }, [isAuthenticated]);
 
   // ── Audio progress ──
   useEffect(() => {
@@ -204,6 +292,10 @@ export default function Admin() {
   useEffect(() => {
     if (audioRef.current) audioRef.current.volume = isMuted ? 0 : volume;
   }, [volume, isMuted]);
+
+  useEffect(() => {
+    localStorage.setItem('syncwave_volume', volume.toString());
+  }, [volume]);
 
   // ── Play / Pause / Seek ──
   const playSong = useCallback((song: Song) => {
@@ -275,25 +367,16 @@ export default function Admin() {
         setUploadProgress({ current: i + 1, total: files.length });
         const base64 = await fileToBase64(file);
         const id = generateSongId(base64);
-        const existing = songs.find(s => s.id === id);
-        if (existing) continue;
+        if (songs.find(s => s.id === id)) continue;
 
-        // Get audio duration
         const duration = await getAudioDuration(file);
-
         const song: Song = {
-          id,
-          title: file.name.replace(/\.[^/.]+$/, ''),
-          fileData: base64,
-          mimeType: file.type || 'audio/mpeg',
-          duration,
-          size: file.size,
-          createdAt: Date.now(),
-          createdBy: 'admin',
+          id, title: file.name.replace(/\.[^/.]+$/, ''),
+          fileData: base64, mimeType: file.type || 'audio/mpeg',
+          duration, size: file.size,
+          createdAt: Date.now(), createdBy: 'admin',
         };
         await dbSaveSong(song);
-
-        // Broadcast to connected listeners
         syncRef.current?.broadcastNewSong(song);
       } catch (err) {
         console.error('Upload error:', err);
@@ -304,16 +387,6 @@ export default function Admin() {
     await loadSongs();
     setUploading(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
-  };
-
-  const getAudioDuration = (file: File): Promise<number> => {
-    return new Promise((resolve) => {
-      const audio = document.createElement('audio');
-      audio.preload = 'metadata';
-      audio.onloadedmetadata = () => resolve(audio.duration || 0);
-      audio.onerror = () => resolve(0);
-      audio.src = URL.createObjectURL(file);
-    });
   };
 
   // ── Delete ──
@@ -338,6 +411,17 @@ export default function Admin() {
     });
   };
 
+  // ── Logout ──
+  const handleLogout = () => {
+    syncRef.current?.destroy();
+    localStorage.removeItem('syncwave_admin_auth');
+    setIsAuthenticated(false);
+  };
+
+  if (!isAuthenticated) {
+    return <PasswordGate onUnlock={() => setIsAuthenticated(true)} />;
+  }
+
   return (
     <div className="min-h-[100dvh] bg-[#0A0A0A] text-white font-['Tajawal'] pb-40" dir="rtl">
       <audio ref={audioRef} crossOrigin="anonymous" playsInline preload="auto" />
@@ -352,9 +436,14 @@ export default function Admin() {
             <Radio className="w-5 h-5 text-[#FF00FF]" />
             <span className="font-bold text-sm">مساحة المسؤول</span>
           </div>
-          <div className="flex items-center gap-1.5">
-            <div className={`w-2 h-2 rounded-full ${syncState === 'ready' ? 'bg-[#00FF66] animate-pulse' : 'bg-[#FFAA00] animate-pulse'}`} />
-            <span className="text-[10px] text-[#A0A0A0]">{syncState === 'ready' ? 'جاهز' : 'جاري...'}</span>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
+              <div className={`w-2 h-2 rounded-full ${syncState === 'ready' ? 'bg-[#00FF66] animate-pulse' : 'bg-[#FFAA00] animate-pulse'}`} />
+              <span className="text-[10px] text-[#A0A0A0]">{syncState === 'ready' ? 'جاهز' : 'جاري...'}</span>
+            </div>
+            <button onClick={handleLogout} className="text-[10px] text-[#FF3366] hover:bg-[#FF3366]/10 px-2 py-1 rounded transition-colors">
+              خروج
+            </button>
           </div>
         </div>
       </div>
@@ -362,14 +451,19 @@ export default function Admin() {
       <div className="max-w-[1200px] mx-auto px-4 pt-4">
         {/* Peer ID / Invite */}
         <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="bg-gradient-to-br from-[#FF00FF]/10 to-[#111111] border border-[#FF00FF]/20 rounded-2xl p-4 mb-4">
-          <p className="text-[#A0A0A0] text-xs mb-2">رابط الاستماع للمستمعين:</p>
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-[#A0A0A0] text-xs">رابط الاستماع للمستمعين:</p>
+            {peerIdReady && (
+              <span className="text-[10px] text-[#00FF66] font-mono bg-[#00FF66]/10 px-2 py-0.5 rounded">{syncRef.current?.peerId}</span>
+            )}
+          </div>
           <div className="flex items-center gap-2">
             <code className="flex-1 bg-[#0A0A0A] rounded-lg px-3 py-2 text-[10px] text-[#00F0FF] font-mono truncate border border-[#222222]">
-              {syncRef.current?.peerId
-                ? `${window.location.origin}${window.location.pathname}#/listen?room=${syncRef.current.peerId}`
+              {peerIdReady
+                ? `${window.location.origin}${window.location.pathname}#/listen?room=${syncRef.current?.peerId}`
                 : 'جاري التهيئة...'}
             </code>
-            <button onClick={copyLink} disabled={!syncRef.current?.peerId} className="bg-[#FF00FF] hover:bg-[#FF00FF]/80 disabled:opacity-40 text-white p-2.5 rounded-lg transition-all flex-shrink-0">
+            <button onClick={copyLink} disabled={!peerIdReady} className="bg-[#FF00FF] hover:bg-[#FF00FF]/80 disabled:opacity-40 text-white p-2.5 rounded-lg transition-all flex-shrink-0">
               {copied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
             </button>
           </div>
@@ -386,6 +480,15 @@ export default function Admin() {
               <p className="text-lg font-bold">{listenerCount}</p>
               <p className="text-[10px] text-[#A0A0A0]">مستمع متصل</p>
             </div>
+            {listenerCount > 0 && (
+              <div className="mr-auto flex -space-x-1">
+                {listenerIds.slice(0, 3).map((id, i) => (
+                  <div key={id} className="w-6 h-6 rounded-full bg-[#FF00FF]/20 border border-[#222222] flex items-center justify-center text-[8px] font-mono" style={{marginRight: i > 0 ? '-4px' : '0'}}>
+                    {id.slice(-2)}
+                  </div>
+                ))}
+              </div>
+            )}
           </motion.div>
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.15 }} className="flex-1 bg-[#111111] border border-[#222222] rounded-xl p-3 flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-[#00F0FF]/10 flex items-center justify-center">
