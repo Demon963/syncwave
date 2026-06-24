@@ -92,11 +92,11 @@ export class AdminSync {
     this.L.forEach((e: any) => { if (e.conn.open) this.sndSong(e.conn, song); });
   }
 
-  sendCmd(action: string, songId: string, time: number) {
+  sendCommand(action: string, songId: string, time: number) {
     const ts = now();
     this.L.forEach((e: any) => { if (e.conn.open) e.conn.send({ t: 'cmd', action, songId, time, ts, offset: e.off }); });
   }
-  getLC(): number { let c = 0; this.L.forEach((e: any) => { if (e.conn?.open) c++; }); return c; }
+  getListenerCount(): number { let c = 0; this.L.forEach((e: any) => { if (e.conn?.open) c++; }); return c; }
   onStateChange(cb: () => void) { this.cbS = cb; }
   onNewListener(cb: (id: string) => void) { this.cbN = cb; }
   destroy() { this.dead = true; this.L.forEach((e: any) => e.conn?.close()); sd(this.peer); }
