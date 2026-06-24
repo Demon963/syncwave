@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: syncwave
-    runtime: node
-    buildCommand: npm run build
-    startCommand: node server.js
-    envVars:
-      - key: NODE_ENV
-        value: production
